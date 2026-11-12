@@ -1,0 +1,280 @@
+package com.example
+
+import io.github.damir.denis.tudor.ktor.server.rabbitmq.RabbitMQ
+import io.github.damir.denis.tudor.ktor.server.rabbitmq.dsl.*
+import io.github.damir.denis.tudor.ktor.server.rabbitmq.rabbitMQ
+import io.ktor.http.*
+import io.ktor.server.application.*
+import io.ktor.server.plugins.*
+import io.ktor.server.request.*
+import io.ktor.server.response.*
+import io.ktor.server.routing.*
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
+import java.sql.Connection
+import java.sql.DriverManager
+
+fun Application.configureDemo() {
+    val isEmbedded = environment.config.propertyOrNull("postgres.embedded")?.getString()
+        ?.toBoolean() ?: false
+    val dbConnection: Connection = DriverManager.getConnection(
+        if (isEmbedded) "jdbc:h2:mem:test;DB_CLOSE_DELAY=-1"
+        else environment.config.property("postgres.url").getString(),
+        if (isEmbedded) "root"
+        else environment.config.property("postgres.user").getString(),
+        if (isEmbedded) ""
+        else environment.config.property("postgres.password").getString()
+    )
+
+    routing {
+        // Main demo page
+        get("/demo") {
+            val cities = withContext(Dispatchers.IO) {
+                val stmt = dbConnection.createStatement()
+                val rs = stmt.executeQuery("SELECT id, name, population FROM cities ORDER BY id")
+                val list = mutableListOf<Triple<Int, String, Int>>()
+                while (rs.next()) {
+                    list.add(Triple(rs.getInt(1), rs.getString(2), rs.getInt(3)))
+                }
+                list
+            }
+            call.respondText(
+                """<!DOCTYPE html>
+<html>
+<head><title>Ktor Demo — PostgreSQL + RabbitMQ</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+         background: #f5f7fa; color: #2d3748; padding: 2rem; max-width: 900px; margin: 0 auto; }
+  h1 { color: #2b6cb0; margin-bottom: 0.5rem; }
+  .subtitle { color: #718096; margin-bottom: 1.5rem; }
+  .card { background: white; border-radius: 8px; padding: 1.5rem; margin-bottom: 1.5rem;
+          box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
+  h2 { color: #2d3748; margin-bottom: 1rem; font-size: 1.25rem; }
+  table { width: 100%; border-collapse: collapse; }
+  th, td { padding: 0.75rem 1rem; text-align: left; border-bottom: 1px solid #e2e8f0; }
+  th { background: #edf2f7; font-weight: 600; }
+  tr:hover { background: #f7fafc; }
+  .btn { background: #3182ce; color: white; border: none; padding: 0.5rem 1rem;
+         border-radius: 4px; cursor: pointer; font-size: 0.875rem; margin-right: 0.5rem; }
+  .btn:hover { background: #2b6cb0; }
+  .btn-green { background: #38a169; }
+  .btn-green:hover { background: #2f855a; }
+  .btn-orange { background: #dd6b20; }
+  .btn-orange:hover { background: #c05621; }
+  .btn-purple { background: #805ad5; }
+  .btn-purple:hover { background: #6b46c1; }
+  .output { background: #1a202c; color: #68d391; padding: 1rem; border-radius: 4px;
+            font-family: 'Monaco', 'Consolas', monospace; font-size: 0.8rem;
+            white-space: pre-wrap; max-height: 300px; overflow-y: auto;
+            display: none; margin-top: 1rem; }
+  .status { padding: 0.5rem 1rem; border-radius: 4px; margin-top: 1rem; display: none; }
+  .status.success { background: #c6f6d5; color: #22543d; display: block; }
+  .status.error { background: #fed7d7; color: #742a2a; display: block; }
+</style>
+</head>
+<body>
+  <h1>Ktor Demo</h1>
+  <p class="subtitle">PostgreSQL + RabbitMQ integrated application</p>
+
+  <div class="card">
+    <h2>🏙️ Cities in Database (${cities.size} cities)</h2>
+    <table>
+      <tr><th>ID</th><th>Name</th><th>Population</th></tr>
+      ${cities.joinToString("\n") { "<tr><td>${it.first}</td><td>${it.second}</td><td>${it.third}</td></tr>" }}
+      ${if (cities.isEmpty()) "<tr><td colspan='3' style='text-align:center;color:#a0aec0;'>No cities yet</td></tr>" else ""}
+    </table>
+  </div>
+
+  <div class="card">
+    <h2>📦 RabbitMQ Messages</h2>
+    <div id="ws-status" style="margin-bottom: 0.5rem; font-size: 0.85rem; color: #a0aec0;">
+      <span id="ws-indicator">⚪</span> Connecting to RabbitMQ...
+    </div>
+    <div id="output-consumed" class="output" style="min-height: 60px;">Waiting for messages...</div>
+  </div>
+
+  <div class="card">
+    <h2>🔧 Operations</h2>
+    <button class="btn" onclick="createCity()">Create City</button>
+    <button class="btn btn-green" onclick="refreshCities()">Refresh Cities</button>
+    <button class="btn btn-orange" onclick="publishMessage()">Publish to RabbitMQ</button>
+    <button class="btn" onclick="listCities()">List All Cities (API)</button>
+
+    <div id="status" class="status"></div>
+    <div id="output" class="output"></div>
+  </div>
+
+<script>
+function showStatus(msg, type) {
+  const el = document.getElementById('status');
+  el.textContent = msg;
+  el.className = 'status ' + type;
+}
+function showOutput(msg) {
+  const el = document.getElementById('output');
+  el.textContent = msg;
+  el.style.display = 'block';
+}
+function showConsumedOutput(msg) {
+  const el = document.getElementById('output-consumed');
+  el.textContent = msg;
+  el.style.display = 'block';
+}
+
+// WebSocket connection for real-time RabbitMQ messages
+var ws = null;
+function connectWebSocket() {
+  var protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+  var wsUrl = protocol + '//' + window.location.host + '/demo/ws';
+  ws = new WebSocket(wsUrl);
+
+  ws.onopen = function() {
+    document.getElementById('ws-indicator').textContent = '🟢';
+    document.getElementById('ws-status').querySelector('span').nextSibling.textContent = ' Connected!';
+  };
+
+  ws.onclose = function() {
+    document.getElementById('ws-indicator').textContent = '🔴';
+    document.getElementById('ws-status').querySelector('span').nextSibling.textContent = ' Disconnected';
+    // Retry after 3 seconds
+    setTimeout(connectWebSocket, 3000);
+  };
+
+  ws.onmessage = function(event) {
+    const data = JSON.parse(event.data);
+    const el = document.getElementById('output-consumed');
+    el.textContent = el.textContent === 'Waiting for messages...' ? data.body : el.textContent + '\n' + data.body;
+    el.style.display = 'block';
+  };
+
+  ws.onerror = function(error) {
+    document.getElementById('ws-indicator').textContent = '🔴';
+    document.getElementById('ws-status').querySelector('span').nextSibling.textContent = ' Error';
+  };
+}
+
+// Start WebSocket connection on page load
+connectWebSocket();
+function hideOutputs() {
+  document.getElementById('status').style.display = 'none';
+  document.getElementById('output').style.display = 'none';
+}
+
+async function createCity() {
+  hideOutputs();
+  try {
+    const res = await fetch('/demo/cities', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: 'Berlin', population: 3670000 })
+    });
+    const text = await res.text();
+    showStatus('POST /demo/cities → ' + res.status + ' ' + text, 'success');
+    refreshCities();
+  } catch(e) { showStatus('Error: ' + e.message, 'error'); }
+}
+
+async function refreshCities() {
+  hideOutputs();
+  try {
+    const res = await fetch('/demo/cities');
+    const data = await res.json();
+    showStatus('Cities refreshed: ' + data.length + ' cities', 'success');
+    showOutput(JSON.stringify(data, null, 2));
+  } catch(e) { showStatus('Error: ' + e.message, 'error'); }
+}
+
+async function publishMessage() {
+  hideOutputs();
+  try {
+    const res = await fetch('/demo/rabbitmq/publish', { method: 'POST' });
+    const text = await res.text();
+    if (res.ok) {
+      showStatus('RabbitMQ message published to test-exchange (watch for it in the messages panel)', 'success');
+    } else {
+      showStatus('RabbitMQ error: ' + text, 'error');
+      return;
+    }
+  } catch(e) { showStatus('Error: ' + e.message, 'error'); }
+}
+
+async function listCities() {
+  hideOutputs();
+  try {
+    const res = await fetch('/demo/cities');
+    const data = await res.json();
+    showOutput(JSON.stringify(data, null, 2));
+  } catch(e) { showStatus('Error: ' + e.message, 'error'); }
+}
+
+async function viewConsumedMessages() {
+  try {
+    const res = await fetch('/demo/rabbitmq/consumed');
+    const data = await res.json();
+    if (data.length === 0) {
+      showConsumedOutput('No messages consumed yet.\n\n1. Click "Publish to RabbitMQ" to send a message.\n2. The consumer picks it up automatically.\n3. The message body will appear here.');
+    } else {
+      showConsumedOutput(data.join('\n'));
+    }
+  } catch(e) { showStatus('Error: ' + e.message, 'error'); }
+}
+</script>
+</body>
+</html>""".trimIndent(),
+                ContentType.Text.Html
+            )
+        }
+
+        // GET /demo/cities - list all cities
+        get("/demo/cities") {
+            val stmt = dbConnection.createStatement()
+            val rs = stmt.executeQuery("SELECT id, name, population FROM cities ORDER BY id")
+            val cities = mutableListOf<CityView>()
+            while (rs.next()) {
+                cities.add(CityView(rs.getInt(1), rs.getString(2), rs.getInt(3)))
+            }
+            call.respond(cities)
+        }
+
+        // POST /demo/cities - create a city
+        post("/demo/cities") {
+            val city = call.receive<Map<String, Any>>()
+            val name = city["name"] as? String ?: throw IllegalArgumentException("name required")
+            val population = city["population"] as? Int ?: throw IllegalArgumentException("population required")
+            withContext(Dispatchers.IO) {
+                val stmt = dbConnection.prepareStatement(
+                    "INSERT INTO cities (name, population) VALUES (?, ?)",
+                    java.sql.Statement.RETURN_GENERATED_KEYS
+                )
+                stmt.setString(1, name)
+                stmt.setInt(2, population)
+                stmt.executeUpdate()
+                val keys = stmt.generatedKeys
+                if (keys.next()) {
+                    call.respondText("Created city with id=${keys.getInt(1)}", ContentType.Text.Plain)
+                } else {
+                    call.respondText("Created city", ContentType.Text.Plain)
+                }
+            }
+        }
+
+        // POST /demo/rabbitmq/publish - publish a message to RabbitMQ
+        rabbitmq {
+            post("/demo/rabbitmq/publish") {
+                basicPublish {
+                    exchange = "test-exchange"
+                    routingKey = "test-routing-key"
+                    properties = basicProperties { correlationId = "demo-${System.currentTimeMillis()}" }
+                    message { "Hello from Ktor demo! Time: ${System.currentTimeMillis()}" }
+                }
+                call.respondText("Message published to RabbitMQ (test-exchange)", ContentType.Text.Plain)
+            }
+        }
+
+        // GET /demo/rabbitmq/consumed - list messages consumed by the consumer
+        get("/demo/rabbitmq/consumed") {
+            call.respond(ConsumerState.consumedMessages.toList())
+        }
+    }
+}

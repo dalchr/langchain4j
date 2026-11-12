@@ -1,0 +1,13 @@
+ktor:
+  deployment:
+    port: 8080
+  application:
+    modules:
+      - com.example.SerializationKt.configureSerialization
+      - com.example.ThymeleafKt.configureThymeleaf
+      - com.example.PostgresKt.configurePostgres
+      - com.example.RabbitmqKt.configureRabbitmq
+      - com.example.RoutingKt.configureRouting
+
+postgres:
+  embedded: true

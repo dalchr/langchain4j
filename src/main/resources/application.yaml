@@ -1,0 +1,22 @@
+ktor:
+  deployment:
+    port: 8080
+  application:
+    modules:
+      - com.example.SerializationKt.configureSerialization
+      - com.example.ThymeleafKt.configureThymeleaf
+      - com.example.PostgresKt.configurePostgres
+      - com.example.RabbitmqKt.configureRabbitmq
+      - com.example.WebsocketKt.configureWebsockets
+      - com.example.RoutingKt.configureRouting
+      - com.example.DemoKt.configureDemo
+
+postgres:
+  embedded: false
+  url: jdbc:postgresql://localhost:5432/ktor_db
+  user: postgres
+  password: postgres
+
+rabbitmq:
+  uri: amqp://guest:guest@localhost:5672
+  name: ktor-app

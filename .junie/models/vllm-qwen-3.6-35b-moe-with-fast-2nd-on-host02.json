@@ -1,0 +1,15 @@
+{
+  "baseUrl": "http://finndet-host01:8000/v1/chat/completions",
+  "id": "nvidia/Qwen3.6-35B-A3B-NVFP4",
+  "apiType": "OpenAICompletion",
+
+  "primaryModel": {
+    "id": "nvidia/Qwen3.6-35B-A3B-NVFP4"
+  },
+
+  "fasterModel": {
+    "baseUrl": "http://finndet-host02:8000/v1/chat/completions",
+    "id": "openai/gpt-oss-20b",
+    "apiType": "OpenAICompletion"
+  }
+}
