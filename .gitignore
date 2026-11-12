@@ -2,4 +2,9 @@
 .gradle/
 build/
 gradle/
+
+frontend/.idea/
+frontend/dist/
+frontend/node_modules/
+
 *.iml

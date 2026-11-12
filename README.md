@@ -37,3 +37,39 @@ If the server starts successfully, you'll see the following output:
 2024-12-04 14:32:45.584 [main] INFO  Application - Application started in 0.303 seconds.
 2024-12-04 14:32:45.682 [main] INFO  Application - Responding at http://0.0.0.0:8080
 ```
+
+## React frontend
+
+The React + TypeScript frontend lives in `frontend/` and owns the `/app/` URL space. Existing Ktor demo and Thymeleaf routes remain unchanged.
+
+### Development
+
+Start the backend with `./gradlew run`, then start Vite in a second terminal:
+
+```bash
+cd frontend
+npm ci
+npm run dev
+```
+
+Vite serves the frontend under `/app/` and proxies `/demo/**`, including `/demo/ws`, to Ktor on port `8080`. The frontend uses native `fetch` for city and publish operations and the browser WebSocket API for live RabbitMQ messages; there is no GraphQL endpoint in this Ktor application.
+
+### Elasticsearch city search
+
+`docker compose up -d` starts Elasticsearch on port `9200` alongside PostgreSQL and RabbitMQ. Ktor creates the `cities` index and reindexes database cities at startup; newly created cities are indexed immediately. `GET /demo/cities/search?name=lon` queries Elasticsearch, and the React search field sends a request after each keystroke with a 20 ms debounce.
+
+### Production assets
+
+Build the frontend and copy its output into Ktor resources before creating the application artifact:
+
+```bash
+cd frontend
+npm ci
+npm run build
+cd ..
+mkdir -p src/main/resources/frontend
+cp -R frontend/dist/. src/main/resources/frontend/
+./gradlew clean build
+```
+
+The copied assets are served from `/app/` by Ktor, including SPA fallback for nested `/app/...` routes. Keep generated assets out of version control unless the deployment process explicitly requires them. The fallback is limited to `/app`, so `/demo/**`, `/demo/ws`, Thymeleaf pages, and other backend routes retain ownership of their paths.

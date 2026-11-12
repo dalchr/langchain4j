@@ -11,10 +11,12 @@ import io.ktor.server.response.*
 import io.ktor.server.routing.*
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.runBlocking
 import java.sql.Connection
 import java.sql.DriverManager
 
 fun Application.configureDemo() {
+    val app = this
     val isEmbedded = environment.config.propertyOrNull("postgres.embedded")?.getString()
         ?.toBoolean() ?: false
     val dbConnection: Connection = DriverManager.getConnection(
@@ -25,6 +27,15 @@ fun Application.configureDemo() {
         if (isEmbedded) ""
         else environment.config.property("postgres.password").getString()
     )
+    val elasticsearch = ElasticsearchClient(
+        environment.config.propertyOrNull("elasticsearch.url")?.getString() ?: "http://localhost:9200"
+    )
+    runCatching {
+        val cities = dbConnection.createStatement().executeQuery("SELECT id, name, population FROM cities").let { rs ->
+            buildList { while (rs.next()) add(CityView(rs.getInt(1), rs.getString(2), rs.getInt(3))) }
+        }
+        runBlocking(Dispatchers.IO) { elasticsearch.reindex(cities) }
+    }.onFailure { app.log.warn("Elasticsearch is unavailable; city search will retry on the next restart", it) }
 
     routing {
         // Main demo page
@@ -237,6 +248,16 @@ async function viewConsumedMessages() {
             call.respond(cities)
         }
 
+        get("/demo/cities/search") {
+            val name = call.request.queryParameters["name"].orEmpty().trim()
+            if (name.isEmpty()) {
+                call.respond(emptyList<CityView>())
+            } else {
+                call.respond(runCatching { withContext(Dispatchers.IO) { elasticsearch.searchByName(name) } }
+                    .getOrElse { throw IllegalStateException("City search is unavailable", it) })
+            }
+        }
+
         // POST /demo/cities - create a city
         post("/demo/cities") {
             val city = call.receive<Map<String, Any>>()
@@ -252,6 +273,9 @@ async function viewConsumedMessages() {
                 stmt.executeUpdate()
                 val keys = stmt.generatedKeys
                 if (keys.next()) {
+                    val id = keys.getInt(1)
+                    runCatching { elasticsearch.indexCity(CityView(id, name, population)) }
+                        .onFailure { app.log.warn("Unable to index city $id", it) }
                     call.respondText("Created city with id=${keys.getInt(1)}", ContentType.Text.Plain)
                 } else {
                     call.respondText("Created city", ContentType.Text.Plain)
