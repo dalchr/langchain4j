@@ -54,6 +54,12 @@ npm run dev
 
 Vite serves the frontend under `/app/` and proxies `/demo/**`, including `/demo/ws`, to Ktor on port `8080`. The frontend uses native `fetch` for city and publish operations and the browser WebSocket API for live RabbitMQ messages; there is no GraphQL endpoint in this Ktor application.
 
+### LLM city assistant
+
+The React page includes a conversation panel backed by LangChain4j and the OpenAI-compatible streaming endpoint configured in `src/main/resources/application.yaml` (`llm.base-url` and `llm.model-name`). The defaults use `http://finndet-host02:8000/v1/chat/completions` with model `openai/gpt-oss-20b`. Set `LLM_API_KEY` in the Ktor process environment if the configured model server requires an API key; otherwise the backend uses a placeholder key.
+
+The browser sends `POST /demo/agent/chat/stream` with `{ "conversationId": "…", "message": "…" }`. The response is Server-Sent Events with JSON `token`, `done`, and `error` events; token content is rendered as it arrives. The conversation ID is kept in browser session storage, and the backend retains a bounded message window per conversation. Create requests without a population ask for that value before writing. Update and delete requests resolve the exact city name through Elasticsearch, then use the existing RabbitMQ-backed persistence, reindexing, and WebSocket city refresh flow. Elasticsearch must be available for these name-based changes.
+
 ### Elasticsearch city search
 
 `docker compose up -d` starts Elasticsearch on port `9200` alongside PostgreSQL and RabbitMQ. Ktor creates the `cities` index and reindexes database cities at startup; newly created cities are indexed immediately. `GET /demo/cities/search?name=lon` queries Elasticsearch, and the React search field sends a request after each keystroke with a 20 ms debounce.

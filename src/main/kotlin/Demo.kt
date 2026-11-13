@@ -39,6 +39,17 @@ fun Application.configureDemo() {
         environment.config.propertyOrNull("elasticsearch.url")?.getString() ?: "http://localhost:9200"
     )
     CityChangeProcessor.search = elasticsearch
+    val cityAgent = CityAgent(
+        application = app,
+        baseUrl = environment.config.propertyOrNull("llm.base-url")?.getString()
+            ?: "http://finndet-host02:8000/v1/chat/completions",
+        modelName = environment.config.propertyOrNull("llm.model-name")?.getString() ?: "openai/gpt-oss-20b",
+        apiKey = System.getenv("LLM_API_KEY") ?: "not-needed",
+        searchCities = elasticsearch::searchByName,
+        enqueueChange = { command ->
+            runBlocking(Dispatchers.IO) { CityCommandPublisher.publish(command) }
+        },
+    )
     runCatching {
         val cities = dbConnection.createStatement().executeQuery("SELECT id, name, population FROM cities").let { rs ->
             buildList { while (rs.next()) add(CityView(rs.getInt(1), rs.getString(2), rs.getInt(3))) }
@@ -298,6 +309,8 @@ async function viewConsumedMessages() {
                 call.respondText("Message published to RabbitMQ (test-exchange)", ContentType.Text.Plain)
             }
         }
+
+        with(cityAgent) { routes() }
 
         // GET /demo/rabbitmq/consumed - list messages consumed by the consumer
         get("/demo/rabbitmq/consumed") {

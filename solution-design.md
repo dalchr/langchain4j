@@ -1,6 +1,6 @@
-# Solution Design — RabbitMQ Message Publishing Flow
+# Solution Design — React City Dashboard, RabbitMQ, and City Assistant
 
-This document describes the complete end-to-end cycle triggered when the user clicks **"Publish to RabbitMQ"** in the Ktor demo application.
+This document describes the end-to-end flows in the Ktor demo application: publishing a RabbitMQ message, managing cities from the React UI, and using the LangChain4j city assistant to stream responses and request city changes.
 
 ---
 
@@ -137,3 +137,125 @@ sequenceDiagram
 | [src/main/kotlin/ConsumerState.kt](src/main/kotlin/ConsumerState.kt) | Shared mutable state for consumed messages |
 | [src/main/kotlin/Websocket.kt](src/main/kotlin/Websocket.kt) | WebSocket route that broadcasts messages to clients |
 | [src/main/resources/application.yaml](src/main/resources/application.yaml) | RabbitMQ connection configuration (host, port, vhost, credentials) |
+
+---
+
+## 8. React City Dashboard and Direct City Changes
+
+The React application is served under `/app/`. Its city controls use the existing Ktor REST routes rather than accessing PostgreSQL or Elasticsearch directly:
+
+| Action | Request | Result |
+|---|---|---|
+| List cities | `GET /demo/cities` | Returns the persisted city records. |
+| Search by name | `GET /demo/cities/search?name=...` | Searches the Elasticsearch `cities` index. The React input debounces keystrokes by 20 ms and cancels stale requests. |
+| Create city | `POST /demo/cities` | Enqueues a `CITY_CHANGE` command with the name and population; the database generates the ID. |
+| Update city | `PUT /demo/cities/{id}` | Enqueues a command containing the existing ID, new name, and population. |
+| Delete city | `DELETE /demo/cities/{id}` | Enqueues a command containing the ID. |
+
+City mutations do not write to the database in the HTTP request. The Ktor route publishes a command to `test-exchange` with routing key `test-routing-key`, and returns after the command has been published. The RabbitMQ consumer parses the command and `CityChangeProcessor` applies it using a dedicated JDBC connection and transaction. After a successful commit, it reads the cities, attempts to rebuild the Elasticsearch index, and sends `city-changed` through `ConsumerState`; connected WebSocket clients receive the event and reload the city list. Elasticsearch reindex errors are logged and do not roll back an already committed database change.
+
+```mermaid
+sequenceDiagram
+    participant UI as React city controls
+    participant Ktor as Ktor city routes
+    participant RMQ as RabbitMQ
+    participant Consumer as City-change consumer
+    participant DB as PostgreSQL
+    participant ES as Elasticsearch
+    participant WS as WebSocket clients
+
+    UI->>Ktor: POST / PUT / DELETE /demo/cities...
+    Ktor->>RMQ: Publish CITY_CHANGE command
+    Ktor-->>UI: Command queued
+    RMQ-->>Consumer: Deliver command
+    Consumer->>DB: Apply mutation in transaction
+    DB-->>Consumer: Commit
+    Consumer->>ES: Reindex committed city data
+    Consumer->>WS: Publish city-changed
+    WS-->>UI: WebSocket event
+    UI->>Ktor: GET /demo/cities
+    Ktor-->>UI: Current city list
+```
+
+The WebSocket channel is broadcast to connected clients, so a change made by one browser causes each connected React page to refresh its list. A manual refresh uses the same `GET /demo/cities` read path.
+
+---
+
+## 9. LangChain4j City Assistant
+
+The React assistant sends a JSON request to `POST /demo/agent/chat/stream`:
+
+```json
+{
+  "conversationId": "browser-session-conversation-id",
+  "message": "Update Oslo to a population of 710000"
+}
+```
+
+The request requires a non-blank conversation ID (at most 128 characters) and a non-blank message of at most 4,000 characters. The configured LangChain4j `OpenAiStreamingChatModel` connects to the OpenAI-compatible chat-completions service. `llm.base-url` and `llm.model-name` are configured in `application.yaml`; the default model is `openai/gpt-oss-20b`. The configured full chat-completions URL is normalized to its API base URL by the backend. `LLM_API_KEY` supplies the API key when the model service requires one; credentials should be supplied through the runtime environment, not committed to source control.
+
+The backend sends Server-Sent Events (`Content-Type: text/event-stream`) as JSON data frames. `token` events contain partial response text, `done` marks successful completion, and `error` signals an assistant failure with a user-safe message. The React service incrementally parses these frames and appends token content to the current assistant message, producing the typing effect.
+
+### Conversation memory and orchestration
+
+- The client keeps a conversation ID in browser session storage and reuses it on subsequent turns in that tab/session.
+- The backend registry creates a `MessageWindowChatMemory` per conversation and retains up to 20 messages. A per-conversation mutex serializes turns so simultaneous requests cannot mutate the same memory or pending operation concurrently.
+- The assistant is instructed to use its tools for requested city changes, never invent a database ID or population, and resolve update/delete targets by exact city name.
+- If a create request omits population, the create tool retains the pending city name in that conversation and asks the user for the missing value. A subsequent whole-number population completes the pending creation; an invalid answer requests the population again, and `cancel` clears the pending create.
+
+### City tools and persistence boundary
+
+The assistant exposes create, update, and delete tools. Create accepts the city name and population; its command omits the ID so PostgreSQL can generate it. For update and delete, the tool searches Elasticsearch, filters results to a case-insensitive exact name match, and proceeds only when exactly one city matches. No match, multiple matches, or unavailable search results are reported rather than guessing an entity.
+
+The tools enqueue the same `CITY_CHANGE` RabbitMQ commands used by the React CRUD controls. They do not update PostgreSQL or Elasticsearch directly. The resulting database transaction, Elasticsearch reindex attempt, and `city-changed` WebSocket notification therefore follow the existing shared pipeline, and connected clients refresh in the same way regardless of whether the change came from the form or the assistant. Assistant responses explicitly describe these operations as queued; a successful tool call means the command was published, not that asynchronous persistence has already completed.
+
+```mermaid
+sequenceDiagram
+    participant UI as React assistant
+    participant Ktor as POST /demo/agent/chat/stream
+    participant Memory as Conversation memory
+    participant LLM as OpenAI-compatible model
+    participant Tool as City tools
+    participant ES as Elasticsearch
+    participant RMQ as RabbitMQ
+    participant Consumer as City-change consumer
+    participant DB as PostgreSQL
+    participant WS as WebSocket clients
+
+    UI->>Ktor: conversationId + message
+    Ktor->>Memory: Lock conversation and inspect pending create
+    alt Pending city and numeric population supplied
+        Ktor->>Tool: Complete pending create
+    else No pending follow-up
+        Ktor->>LLM: Stream assistant turn with memory and tools
+        LLM->>Tool: Invoke requested city operation
+        opt Update or delete
+            Tool->>ES: Search and resolve exact city name
+            ES-->>Tool: Unique city including ID
+        end
+    end
+    Tool->>RMQ: Publish CITY_CHANGE command
+    LLM-->>Ktor: Partial response tokens / completion (or follow-up response)
+    Ktor-->>UI: SSE token, done, or error events
+    RMQ-->>Consumer: Deliver CITY_CHANGE command
+    Consumer->>DB: Apply mutation and commit transaction
+    Consumer->>WS: Post-commit city-changed notification via ConsumerState
+    WS-->>UI: Notify connected clients
+    UI->>Ktor: Refresh GET /demo/cities
+```
+
+The request/response stream and the mutation pipeline are intentionally asynchronous and separate: SSE reports the assistant's response, while the WebSocket event reports completion of the database operation and triggers the city-list refresh.
+
+---
+
+## 10. Additional Relevant Source Files
+
+| File | Purpose |
+|---|---|
+| [frontend/src/app/App.tsx](frontend/src/app/App.tsx) | React city dashboard and conversation UI; listens for city-change events through the WebSocket hook and refreshes city data. |
+| [frontend/src/services/demoApi.ts](frontend/src/services/demoApi.ts) | REST calls for city operations and incremental parsing of assistant SSE events. |
+| [frontend/src/hooks/useMessages.ts](frontend/src/hooks/useMessages.ts) | WebSocket connection, message handling, and reconnect behavior. |
+| [src/main/kotlin/CityAgent.kt](src/main/kotlin/CityAgent.kt) | LangChain4j model setup, conversation memory, SSE endpoint, request validation, and city tools. |
+| [src/main/kotlin/CityCommandPublisher.kt](src/main/kotlin/CityCommandPublisher.kt) | Publishes assistant-generated city commands to RabbitMQ. |
+| [src/main/kotlin/CityChangeProcessor.kt](src/main/kotlin/CityChangeProcessor.kt) | Applies city commands transactionally, reindexes Elasticsearch, and emits the city-change WebSocket event. |
+| [src/main/kotlin/Elasticsearch.kt](src/main/kotlin/Elasticsearch.kt) | City indexing, full reindexing, and name search used by the dashboard and assistant tools. |

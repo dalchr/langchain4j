@@ -26,6 +26,8 @@ dependencies {
     implementation(libs.damirdenisTudor.ktorServerRabbitmq)
     implementation(libs.h2database.h2)
     implementation(libs.logback.classic)
+    implementation(libs.langchain4j)
+    implementation(libs.langchain4j.open.ai)
     implementation(libs.postgresql)
 
     testImplementation(kotlin("test"))

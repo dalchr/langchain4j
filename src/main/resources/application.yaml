@@ -23,3 +23,7 @@ rabbitmq:
 
 elasticsearch:
   url: http://localhost:9200
+
+llm:
+  base-url: http://finndet-host02:8000/v1/chat/completions
+  model-name: openai/gpt-oss-20b

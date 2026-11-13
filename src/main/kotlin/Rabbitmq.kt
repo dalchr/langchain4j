@@ -1,6 +1,7 @@
 package com.example
 
 import io.github.damir.denis.tudor.ktor.server.rabbitmq.RabbitMQ
+import io.github.damir.denis.tudor.ktor.server.rabbitmq.ConnectionManagersKey
 import io.github.damir.denis.tudor.ktor.server.rabbitmq.dsl.*
 import io.github.damir.denis.tudor.ktor.server.rabbitmq.rabbitMQ
 import io.ktor.server.application.*
@@ -34,6 +35,8 @@ fun Application.configureRabbitmq() {
         tlsEnabled = false
         scope = rabbitMQScope // custom scope, default is the one provided by Ktor
     }
+    val connectionManager = attributes[ConnectionManagersKey].values.first()
+    CityCommandPublisher.configure(connectionManager, connectionName)
 
     rabbitmq {
         queueBind {
