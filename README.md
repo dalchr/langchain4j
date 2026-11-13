@@ -52,7 +52,25 @@ npm ci
 npm run dev
 ```
 
-Vite serves the frontend under `/app/` and proxies `/demo/**`, including `/demo/ws`, to Ktor on port `8080`. The frontend uses native `fetch` for city and publish operations and the browser WebSocket API for live RabbitMQ messages; there is no GraphQL endpoint in this Ktor application.
+Vite serves the frontend under `/app/` and proxies `/auth/**` and `/demo/**`, including `/demo/ws`, to Ktor on port `8080`. The frontend uses native `fetch` for city and publish operations and the browser WebSocket API for live RabbitMQ messages; there is no GraphQL endpoint in this Ktor application.
+
+### Authentication and authorization
+
+City list and search reads (`GET /demo/cities` and `GET /demo/cities/search`) are public. City create, update, and delete operations, the assistant endpoints, publish action, and `/demo/ws` require a server-side authenticated session. In IntelliJ, use the shared **Ktor Development** run configuration; it sets the local-only credentials. From a terminal, start Ktor with:
+
+```bash
+APP_ENV=development \
+DEV_AUTH_ENABLED=true \
+DEV_AUTH_USERNAME=chris \
+DEV_AUTH_PASSWORD=chris \
+./gradlew run
+```
+
+These are development-only credentials; the password is BCrypt-hashed at startup and is not stored in the repository or database. Local authentication is rejected unless `APP_ENV=development`; setting `APP_ENV=production` while enabling it prevents startup. Without local auth configured, login responds with `503 Service Unavailable`.
+
+The API provides `POST /auth/login`, `POST /auth/logout`, `GET /auth/me`, and `GET /auth/status`. The UI uses `GET /auth/csrf` to obtain a double-submit CSRF token and includes it in a request header for state-changing calls. Session cookies are HttpOnly, SameSite=Lax, and expire after eight hours; production mode marks cookies Secure and requires `SESSION_ENCRYPTION_KEY` (16, 24, or 32 UTF-8 bytes) and `SESSION_SIGNING_KEY` (at least 32 UTF-8 bytes). Supply high-entropy values through a secret manager and terminate HTTPS at the application or a trusted TLS-terminating proxy. The server also sets basic content-type, framing, referrer, and permissions security headers. `/demo/ws` uses the same session cookie; connections are closed after logout or expiry (and revalidated when messages are broadcast).
+
+After login, a pending CRUD, assistant, publish, or restart action is shown for review and requires a separate confirmation; it is never replayed automatically. Five failed login attempts block that client address for 15 minutes; the in-memory limiter is bounded. Sessions and local accounts currently live in process memory, so sessions are invalidated on restart and this implementation is not suitable for a multi-instance deployment without shared session storage. The authentication service boundary is designed to be replaceable, but Keycloak/OIDC integration is not implemented yet.
 
 ### LLM city assistant
 

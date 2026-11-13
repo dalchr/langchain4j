@@ -8,12 +8,18 @@ function websocketUrl(): string {
   return `${protocol}//${window.location.host}/demo/ws`
 }
 
-export function useMessages(onCityChanged?: () => void): { messages: WsMessage[]; connected: boolean } {
+export function useMessages(onCityChanged?: () => void, enabled = true): { messages: WsMessage[]; connected: boolean } {
   const [messages, setMessages] = useState<WsMessage[]>([])
   const [connected, setConnected] = useState(false)
   const socketRef = useRef<WebSocket | null>(null)
 
   useEffect(() => {
+    if (!enabled) {
+      setConnected(false)
+      socketRef.current?.close()
+      socketRef.current = null
+      return
+    }
     let active = true
     let reconnectTimer: number | undefined
 
@@ -31,8 +37,12 @@ export function useMessages(onCityChanged?: () => void): { messages: WsMessage[]
           // Ignore malformed messages while keeping the connection alive.
         }
       }
-      socket.onclose = () => {
+      socket.onclose = (event) => {
         setConnected(false)
+        if (event.code === 1008) {
+          window.dispatchEvent(new Event('app-auth-required'))
+          return
+        }
         if (active) reconnectTimer = window.setTimeout(connect, reconnectDelayMs)
       }
       socket.onerror = () => socket.close()
@@ -45,7 +55,7 @@ export function useMessages(onCityChanged?: () => void): { messages: WsMessage[]
       socketRef.current?.close()
       socketRef.current = null
     }
-  }, [onCityChanged])
+  }, [onCityChanged, enabled])
 
   return { messages, connected }
 }

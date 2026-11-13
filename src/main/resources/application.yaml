@@ -4,6 +4,7 @@ ktor:
   application:
     modules:
       - com.example.SerializationKt.configureSerialization
+      - com.example.AuthenticationKt.configureAuthentication
       - com.example.ThymeleafKt.configureThymeleaf
       - com.example.PostgresKt.configurePostgres
       - com.example.RabbitmqKt.configureRabbitmq

@@ -22,10 +22,12 @@ Introduce a lightweight React + TypeScript frontend alongside the existing singl
 **Out of scope**
 - Introducing Spring Boot, Spring Security, GraphQL, Apollo, GraphQL Code Generator, or a second backend server; none exists in this repository.
 - Rewriting existing `Demo.kt`, `Rabbitmq.kt`, `Websocket.kt`, PostgreSQL setup, or Thymeleaf functionality beyond the minimum integration needed to serve the frontend.
-- Migrating all current pages to React or adding authentication infrastructure that is not currently present.
+- Migrating all current pages to React or replacing the existing backend platform.
 
 ### Functional Requirements
 - A developer can run the frontend independently with Vite and proxy `/demo/**` and `/demo/ws` traffic to Ktor.
+- City list and search reads are available anonymously; city create, update, and delete operations remain authenticated and authorized.
+- The development Vite proxy forwards authentication requests to Ktor so local login works.
 - The production frontend is built into static assets and served under `/app/` by Ktor without intercepting existing routes or WebSocket upgrades.
 - React can display/use existing city REST operations and RabbitMQ message updates through the existing WebSocket protocol.
 - Browser refresh and direct navigation for React routes under `/app/` resolve to the React entry point.
@@ -145,3 +147,58 @@ The README documents model endpoint configuration and the supported streaming/to
 - Document the model base URL/model configuration, required runtime setup, streaming protocol, conversation-memory limits, and tool behavior.
 - Document the Restart control and the city-list/specific-city context tools.
 - Run Gradle tests and frontend type-check/build; verify stream protocol and UI behavior with available local tooling, clearly noting any external LLM/Elasticsearch/RabbitMQ constraints.
+
+### ✓ Step 10: Add local session authentication
+The Ktor application has a replaceable authentication boundary, secure browser sessions, and a development-only local account.
+
+- Add user, password-hashing, session, and authentication-service abstractions; load development credentials only from development configuration/environment.
+- Configure Ktor authentication and sessions with HttpOnly cookies, production Secure behavior, expiration, and session invalidation.
+- Add `/auth/login`, `/auth/logout`, `/auth/me`, and `/auth/status` endpoints with safe response models and tests.
+
+### ✓ Step 11: Centralize permissions and protect city APIs
+All direct city read and mutation endpoints enforce server-side authentication and the required permission.
+
+- Add permission definitions, role mapping, and a shared authorization service.
+- Protect city CRUD/search routes and state-changing publish/reset endpoints as appropriate; add CSRF defenses for cookie-authenticated mutations.
+- Test anonymous rejection, authenticated access, permission denial, and existing field validation.
+
+### ✓ Step 12: Enforce identity and authorization for agent tools
+LangChain4j tool execution uses the authenticated session principal and cannot bypass CRUD authorization.
+
+- Pass an explicit per-request execution context to agent tools, without trusting client/model-supplied identity.
+- Enforce permissions and current authentication inside the shared CRUD execution boundary; retain missing-field guardrails.
+- Test anonymous and authorized tool paths and verify unauthorized calls never enqueue mutations.
+
+### ✓ Step 13: Integrate authentication into React
+The frontend initializes authentication centrally and provides login/logout with safe continuation of pending actions.
+
+- Add authentication state, login UI, user identity/logout controls, and handling for unauthorized API responses.
+- Preserve intended actions across login but require explicit review/confirmation before executing them.
+- Show actionable authentication-required feedback in chat; add frontend checks where practical.
+
+### ✓ Step 14: Secure WebSockets and validate the security boundary
+WebSocket connections and all protected paths follow the same authenticated identity model, with automated coverage of security behavior.
+
+- Require an authenticated session for protected WebSocket/chat access and isolate conversation/tool context by user.
+- Add tests for session lifecycle, CSRF, route security, WebSocket access, and tool identity propagation where supported.
+- Run Gradle tests and frontend type-check/build; document local credentials and configuration without exposing production secrets.
+
+### x Step 15: Require confirmation for agent city mutations
+LangChain4j city tools can only prepare mutations; an authenticated user must explicitly confirm a staged operation before it is sent to RabbitMQ.
+
+- Store one pending create/update/delete per user-scoped conversation and expose authenticated pending, confirm, and cancel endpoints.
+- Confirm the operation server-side using the current session principal and required permission before publishing the command.
+- Render the staged operation in React for review, require explicit confirmation, and test that tool calls alone never enqueue mutations.
+
+### ✓ Step 16: Make disabled development login actionable
+When local development authentication is not configured, Ktor logs the cause and the login UI displays setup guidance instead of a generic `503`.
+
+- Preserve the existing requirement that development credentials are enabled explicitly and cannot be enabled in production.
+- Add or update focused tests for the affected authentication behavior.
+
+### ✓ Step 17: Allow anonymous city reads
+City listing and search are public while all city mutations remain protected by authentication, permissions, and CSRF checks.
+
+- Exclude only city GET list/search routes from authentication; preserve protected write routes and other guarded endpoints.
+- Add regression tests for anonymous reads and anonymous mutation rejection.
+- Run backend and frontend verification.

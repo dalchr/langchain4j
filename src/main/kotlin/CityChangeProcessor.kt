@@ -14,9 +14,15 @@ data class CityCommand(
     val name: String = "",
     val population: Int = 0,
     val conversationId: String? = null,
+    val actorId: String? = null,
 )
 
-internal data class CityOperationRecord(val description: String, val timestamp: Instant, val conversationId: String?)
+internal data class CityOperationRecord(
+    val description: String,
+    val timestamp: Instant,
+    val conversationId: String?,
+    val actorId: String? = null,
+)
 
 internal object CityOperationHistory {
     private const val MAX_ENTRIES = 500
@@ -80,7 +86,7 @@ object CityChangeProcessor {
                         "delete" -> "Deleted ${previous?.name ?: "city ${command.id}"} with population ${previous?.population ?: "unknown"}"
                         else -> error("Unknown city operation: ${command.operation}")
                     }
-                    CityOperationHistory.record(CityOperationRecord(description, Instant.now(), null))
+                    CityOperationHistory.record(CityOperationRecord(description, Instant.now(), null, command.actorId))
                 }
 
                 val cities = connection.createStatement().use { statement ->

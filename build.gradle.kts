@@ -21,6 +21,7 @@ dependencies {
     implementation(ktorLibs.server.contentNegotiation)
     implementation(ktorLibs.server.core)
     implementation(ktorLibs.server.netty)
+    implementation(ktorLibs.server.sessions)
     implementation(ktorLibs.server.thymeleaf)
     implementation(ktorLibs.server.websockets)
     implementation(libs.damirdenisTudor.ktorServerRabbitmq)
@@ -29,6 +30,7 @@ dependencies {
     implementation(libs.langchain4j)
     implementation(libs.langchain4j.open.ai)
     implementation(libs.postgresql)
+    implementation(libs.jbcrypt)
 
     testImplementation(kotlin("test"))
     testImplementation(ktorLibs.server.testHost)

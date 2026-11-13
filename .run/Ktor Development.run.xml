@@ -1,0 +1,19 @@
+<component name="ProjectRunConfigurationManager">
+  <configuration default="false" name="Ktor Development" type="GradleRunConfiguration" factoryName="Gradle">
+    <option name="externalProjectPath" value="$PROJECT_DIR$" />
+    <option name="taskNames">
+      <list>
+        <option value="run" />
+      </list>
+    </option>
+    <option name="environmentVariables">
+      <map>
+        <entry key="APP_ENV" value="development" />
+        <entry key="DEV_AUTH_ENABLED" value="true" />
+        <entry key="DEV_AUTH_USERNAME" value="chris" />
+        <entry key="DEV_AUTH_PASSWORD" value="chris" />
+      </map>
+    </option>
+    <method v="2" />
+  </configuration>
+</component>

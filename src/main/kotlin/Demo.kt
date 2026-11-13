@@ -5,6 +5,7 @@ import io.github.damir.denis.tudor.ktor.server.rabbitmq.dsl.*
 import io.github.damir.denis.tudor.ktor.server.rabbitmq.rabbitMQ
 import io.ktor.http.*
 import io.ktor.server.application.*
+import io.ktor.server.auth.authenticate
 import io.ktor.server.plugins.*
 import io.ktor.server.request.*
 import io.ktor.server.response.*
@@ -59,8 +60,24 @@ fun Application.configureDemo() {
     }.onFailure { app.log.warn("Elasticsearch is unavailable; city search will retry on the next restart", it) }
 
     routing {
+        cityReadRoutes(
+            listCities = {
+                val stmt = dbConnection.createStatement()
+                val rs = stmt.executeQuery("SELECT id, name, population FROM cities ORDER BY id")
+                buildList {
+                    while (rs.next()) add(CityView(rs.getInt(1), rs.getString(2), rs.getInt(3)))
+                }
+            },
+            searchCities = { name ->
+                runCatching { withContext(Dispatchers.IO) { elasticsearch.searchByName(name) } }
+                    .getOrElse { throw IllegalStateException("City search is unavailable", it) }
+            },
+        )
+
+        authenticate("auth-session") {
         // Main demo page
         get("/demo") {
+            if (!call.requirePermission(Permission.CRUD_READ)) return@get
             val cities = withContext(Dispatchers.IO) {
                 val stmt = dbConnection.createStatement()
                 val rs = stmt.executeQuery("SELECT id, name, population FROM cities ORDER BY id")
@@ -143,15 +160,26 @@ function showStatus(msg, type) {
   el.textContent = msg;
   el.className = 'status ' + type;
 }
+
 function showOutput(msg) {
   const el = document.getElementById('output');
   el.textContent = msg;
   el.style.display = 'block';
 }
+
 function showConsumedOutput(msg) {
   const el = document.getElementById('output-consumed');
   el.textContent = msg;
   el.style.display = 'block';
+}
+let csrfToken = null;
+async function csrfHeaders() {
+  if (!csrfToken) {
+    const response = await fetch('/auth/csrf');
+    if (!response.ok) throw new Error('Unable to initialize request security');
+    csrfToken = (await response.json()).token;
+  }
+  return { 'X-CSRF-Token': csrfToken };
 }
 
 // WebSocket connection for real-time RabbitMQ messages
@@ -196,9 +224,10 @@ function hideOutputs() {
 async function createCity() {
   hideOutputs();
   try {
+    const securityHeaders = await csrfHeaders();
     const res = await fetch('/demo/cities', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', ...securityHeaders },
       body: JSON.stringify({ name: 'Berlin', population: 3670000 })
     });
     const text = await res.text();
@@ -220,7 +249,7 @@ async function refreshCities() {
 async function publishMessage() {
   hideOutputs();
   try {
-    const res = await fetch('/demo/rabbitmq/publish', { method: 'POST' });
+    const res = await fetch('/demo/rabbitmq/publish', { method: 'POST', headers: await csrfHeaders() });
     const text = await res.text();
     if (res.ok) {
       showStatus('RabbitMQ message published to test-exchange (watch for it in the messages panel)', 'success');
@@ -258,42 +287,38 @@ async function viewConsumedMessages() {
             )
         }
 
-        // GET /demo/cities - list all cities
-        get("/demo/cities") {
-            val stmt = dbConnection.createStatement()
-            val rs = stmt.executeQuery("SELECT id, name, population FROM cities ORDER BY id")
-            val cities = mutableListOf<CityView>()
-            while (rs.next()) {
-                cities.add(CityView(rs.getInt(1), rs.getString(2), rs.getInt(3)))
-            }
-            call.respond(cities)
-        }
-
-        get("/demo/cities/search") {
-            val name = call.request.queryParameters["name"].orEmpty().trim()
-            if (name.isEmpty()) {
-                call.respond(emptyList<CityView>())
-            } else {
-                call.respond(runCatching { withContext(Dispatchers.IO) { elasticsearch.searchByName(name) } }
-                    .getOrElse { throw IllegalStateException("City search is unavailable", it) })
-            }
-        }
-
         rabbitmq {
             post("/demo/cities") {
-                val city = call.receive<CityCommand>()
+                if (!call.requirePermission(Permission.CRUD_CREATE) || !call.requireCsrfToken()) return@post
+                val user = call.currentAuthenticatedUser() ?: return@post
+                val city = call.receive<CityCommand>().copy(
+                    operation = "create",
+                    id = null,
+                    conversationId = null,
+                    actorId = user.id,
+                )
                 basicPublish { exchange = "test-exchange"; routingKey = "test-routing-key"; message { CityChangeProcessor.payload(city) } }
                 call.respondText("City change queued")
             }
             put("/demo/cities/{id}") {
+                if (!call.requirePermission(Permission.CRUD_UPDATE) || !call.requireCsrfToken()) return@put
                 val id = call.parameters["id"]?.toIntOrNull() ?: throw IllegalArgumentException("invalid id")
-                val city = call.receive<CityCommand>().copy(operation = "update", id = id)
+                val user = call.currentAuthenticatedUser() ?: return@put
+                val city = call.receive<CityCommand>().copy(
+                    operation = "update",
+                    id = id,
+                    conversationId = null,
+                    actorId = user.id,
+                )
                 basicPublish { exchange = "test-exchange"; routingKey = "test-routing-key"; message { CityChangeProcessor.payload(city) } }
                 call.respondText("City change queued")
             }
             delete("/demo/cities/{id}") {
+                if (!call.requirePermission(Permission.CRUD_DELETE) || !call.requireCsrfToken()) return@delete
                 val id = call.parameters["id"]?.toIntOrNull() ?: throw IllegalArgumentException("invalid id")
-                basicPublish { exchange = "test-exchange"; routingKey = "test-routing-key"; message { CityChangeProcessor.payload(CityCommand("delete", id)) } }
+                val user = call.currentAuthenticatedUser() ?: return@delete
+                val command = CityCommand("delete", id, actorId = user.id)
+                basicPublish { exchange = "test-exchange"; routingKey = "test-routing-key"; message { CityChangeProcessor.payload(command) } }
                 call.respondText("City change queued")
             }
         }
@@ -301,6 +326,7 @@ async function viewConsumedMessages() {
         // POST /demo/rabbitmq/publish - publish a message to RabbitMQ
         rabbitmq {
             post("/demo/rabbitmq/publish") {
+                if (!call.requirePermission(Permission.CRUD_CREATE) || !call.requireCsrfToken()) return@post
                 basicPublish {
                     exchange = "test-exchange"
                     routingKey = "test-routing-key"
@@ -315,7 +341,23 @@ async function viewConsumedMessages() {
 
         // GET /demo/rabbitmq/consumed - list messages consumed by the consumer
         get("/demo/rabbitmq/consumed") {
+            if (!call.requirePermission(Permission.CRUD_READ)) return@get
             call.respond(ConsumerState.consumedMessages.toList())
         }
+        }
+    }
+}
+
+internal fun Route.cityReadRoutes(
+    listCities: suspend () -> List<CityView>,
+    searchCities: suspend (String) -> List<CityView>,
+) {
+    get("/demo/cities") {
+        call.respond(listCities())
+    }
+
+    get("/demo/cities/search") {
+        val name = call.request.queryParameters["name"].orEmpty().trim()
+        call.respond(if (name.isEmpty()) emptyList() else searchCities(name))
     }
 }

@@ -16,6 +16,7 @@ class CityAgentToolsTest {
     )
     private val conversations = AgentConversationRegistry()
     private val commands = mutableListOf<CityCommand>()
+    private val user = AuthenticatedUser("local:test-user", "test-user", "Test User")
     private val tools = CityAgentTools(
         conversations = conversations,
         searchCities = { query -> cities.filter { it.name.contains(query, ignoreCase = true) } },
@@ -25,7 +26,7 @@ class CityAgentToolsTest {
 
     @Test
     fun `missing create population asks follow-up and does not persist`() {
-        val answer = tools.createCity("Reykjavik", -1, "conversation-1")
+        val answer = asUser { tools.createCity("Reykjavik", -1, "conversation-1") }
 
         assertEquals("What is the population for \"Reykjavik\"?", answer)
         assertTrue(commands.isEmpty())
@@ -34,13 +35,19 @@ class CityAgentToolsTest {
 
     @Test
     fun `population follow-up completes pending create`() {
-        tools.createCity("Reykjavik", -1, "conversation-1")
+        asUser { tools.createCity("Reykjavik", -1, "conversation-1") }
 
-        val answer = tools.completePendingCreate("conversation-1", 139875)
+        val answer = asUser { tools.completePendingCreate("conversation-1", 139875) }
 
         assertEquals("Queued creation of Reykjavik with a population of 139875.", answer)
         assertEquals(
-            CityCommand("create", name = "Reykjavik", population = 139875, conversationId = "conversation-1"),
+            CityCommand(
+                "create",
+                name = "Reykjavik",
+                population = 139875,
+                conversationId = "conversation-1",
+                actorId = user.id,
+            ),
             commands.single(),
         )
         assertNull(conversations.get("conversation-1").pendingCreateName)
@@ -58,18 +65,25 @@ class CityAgentToolsTest {
 
     @Test
     fun `update resolves exact city name and passes resolved id to persistence`() {
-        val answer = tools.updateCity("Oslo", "Oslo", 710000, "conversation-1")
+        val answer = asUser { tools.updateCity("Oslo", "Oslo", 710000, "conversation-1") }
 
         assertEquals("Queued update of Oslo to Oslo with a population of 710000.", answer)
         assertEquals(
-            CityCommand("update", id = 1, name = "Oslo", population = 710000, conversationId = "conversation-1"),
+            CityCommand(
+                "update",
+                id = 1,
+                name = "Oslo",
+                population = 710000,
+                conversationId = "conversation-1",
+                actorId = user.id,
+            ),
             commands.single(),
         )
     }
 
     @Test
     fun `delete rejects a partial name match without changing a city`() {
-        val answer = tools.deleteCity("Os", "conversation-1")
+        val answer = asUser { tools.deleteCity("Os", "conversation-1") }
 
         assertEquals("I couldn't find a city named Os.", answer)
         assertTrue(commands.isEmpty())
@@ -77,9 +91,9 @@ class CityAgentToolsTest {
 
     @Test
     fun `missing population follow-up does not enqueue create`() {
-        tools.createCity("Reykjavik", -1, "conversation-1")
+        asUser { tools.createCity("Reykjavik", -1, "conversation-1") }
 
-        val answer = tools.completePendingCreate("conversation-1", -1)
+        val answer = asUser { tools.completePendingCreate("conversation-1", -1) }
 
         assertEquals("I cannot complete creating Reykjavik without a non-negative whole-number population. What is its population?", answer)
         assertTrue(commands.isEmpty())
@@ -88,29 +102,36 @@ class CityAgentToolsTest {
 
     @Test
     fun `city context tools provide all cities and a specific current population`() {
-        assertEquals("Oslo: 709037\nOslo East: 1200", tools.listCities())
+        assertEquals("Oslo: 709037\nOslo East: 1200", asUser { tools.listCities("conversation-1") })
         assertEquals(
             "Oslo exists and its current registered population is 709037.",
-            tools.lookupCityByName("Oslo"),
+            asUser { tools.lookupCityByName("Oslo", "conversation-1") },
         )
     }
 
     @Test
     fun `successful city operations are retained in order and available to the assistant`() {
-        tools.recordMessage("conversation-1", "user", "Create Stockholm")
-        tools.createCity("Stockholm", 100000, "conversation-1")
-        tools.recordMessage("conversation-1", "assistant", "Queued Stockholm.")
-        tools.recordMessage("conversation-1", "user", "Remove Oslo")
-        tools.updateCity("Oslo", "Oslo", 710000, "conversation-1")
-        tools.deleteCity("Oslo", "conversation-1")
+        asUser {
+            tools.recordMessage("conversation-1", "user", "Create Stockholm")
+            tools.createCity("Stockholm", 100000, "conversation-1")
+            tools.recordMessage("conversation-1", "assistant", "Queued Stockholm.")
+            tools.recordMessage("conversation-1", "user", "Remove Oslo")
+            tools.updateCity("Oslo", "Oslo", 710000, "conversation-1")
+            tools.deleteCity("Oslo", "conversation-1")
 
-        val history = tools.operationHistory("conversation-1")
-        assertTrue(history.contains("User: Create Stockholm"))
-        assertTrue(history.contains("City operation (queued): Created Stockholm with population 100000"))
-        assertTrue(history.contains("Assistant: Queued Stockholm."))
-        assertTrue(history.contains("User: Remove Oslo"))
-        assertTrue(history.contains("City operation (queued): Updated Oslo to Oslo: population 709037 → 710000"))
-        assertTrue(history.contains("City operation (queued): Deleted Oslo with population 709037"))
+            val history = tools.operationHistory("conversation-1")
+            assertTrue(history.contains("User: Create Stockholm"))
+            assertTrue(history.contains("City operation (queued): Created Stockholm with population 100000"))
+            assertTrue(history.contains("Assistant: Queued Stockholm."))
+            assertTrue(history.contains("User: Remove Oslo"))
+            assertTrue(history.contains("City operation (queued): Updated Oslo to Oslo: population 709037 → 710000"))
+            assertTrue(history.contains("City operation (queued): Deleted Oslo with population 709037"))
+            assertTrue(
+                conversations.get("conversation-1").activityHistory
+                    .filter { it.role == "city_operation" }
+                    .all { it.actorId == user.id },
+            )
+        }
     }
 
     @Test
@@ -119,7 +140,9 @@ class CityAgentToolsTest {
             CityOperationRecord("Deleted Helsinki with population 694000", Instant.now(), null),
         )
 
-        val history = tools.operationHistory("conversation-with-dashboard-delete")
+        val history = asUser("conversation-with-dashboard-delete") {
+            tools.operationHistory("conversation-with-dashboard-delete")
+        }
 
         assertTrue(history.contains("City operation (committed outside the assistant): Deleted Helsinki with population 694000"))
     }
@@ -151,5 +174,44 @@ class CityAgentToolsTest {
         assertTrue(result.text().contains("createCity, updateCity, deleteCity"))
         assertTrue(result.text().contains("Retry the requested action"))
         assertTrue(commands.isEmpty())
+    }
+
+    @Test
+    fun `city mutation tools reject calls without authenticated execution context`() {
+        val answer = tools.deleteCity("Oslo", "conversation-1")
+
+        assertTrue(answer.startsWith("AUTHENTICATION_REQUIRED:"))
+        assertTrue(commands.isEmpty())
+    }
+
+    @Test
+    fun `city mutation tools reject users without permission before enqueueing`() {
+        val reader = user.copy(roles = listOf("READER"))
+        val answer = asUser("conversation-1", reader) {
+            tools.deleteCity("Oslo", "conversation-1")
+        }
+
+        assertTrue(answer.startsWith("PERMISSION_DENIED:"))
+        assertTrue(commands.isEmpty())
+    }
+
+    @Test
+    fun `agent conversation keys are isolated by authenticated user`() {
+        val otherUser = user.copy(id = "local:other-user")
+
+        assertTrue(agentConversationKey(user, "same-id") != agentConversationKey(otherUser, "same-id"))
+    }
+
+    private fun <T> asUser(
+        conversationId: String = "conversation-1",
+        authenticatedUser: AuthenticatedUser = user,
+        action: () -> T,
+    ): T {
+        val executionContext = tools.bindExecutionContext(conversationId, authenticatedUser)
+        return try {
+            action()
+        } finally {
+            executionContext.close()
+        }
     }
 }
