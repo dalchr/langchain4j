@@ -20,10 +20,15 @@ class ElasticsearchClient(private val baseUrl: String) {
 
     fun reindex(cities: List<CityView>) {
         request(
+            "DELETE",
+            "/$index",
+            null,
+            allowStatus = setOf(404),
+        )
+        request(
             "PUT",
             "/$index",
             """{"mappings":{"properties":{"id":{"type":"integer"},"name":{"type":"text"},"population":{"type":"integer"}}}}""",
-            allowStatus = setOf(400),
         )
         cities.forEach(::indexCity)
     }
@@ -43,10 +48,11 @@ class ElasticsearchClient(private val baseUrl: String) {
         }
     }
 
-    private fun request(method: String, path: String, body: String, allowStatus: Set<Int> = emptySet()): String {
-        val request = HttpRequest.newBuilder(URI.create(baseUrl.trimEnd('/') + path))
-            .header("Content-Type", "application/json")
-            .method(method, HttpRequest.BodyPublishers.ofString(body))
+    private fun request(method: String, path: String, body: String?, allowStatus: Set<Int> = emptySet()): String {
+        val builder = HttpRequest.newBuilder(URI.create(baseUrl.trimEnd('/') + path))
+            .method(method, body?.let(HttpRequest.BodyPublishers::ofString) ?: HttpRequest.BodyPublishers.noBody())
+        if (body != null) builder.header("Content-Type", "application/json")
+        val request = builder
             .build()
         val response = http.send(request, HttpResponse.BodyHandlers.ofString())
         if (response.statusCode() !in 200..299 && response.statusCode() !in allowStatus) {

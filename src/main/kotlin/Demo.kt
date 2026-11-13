@@ -12,6 +12,7 @@ import io.ktor.server.routing.*
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.runBlocking
+import kotlinx.serialization.json.Json
 import java.sql.Connection
 import java.sql.DriverManager
 
@@ -27,9 +28,17 @@ fun Application.configureDemo() {
         if (isEmbedded) ""
         else environment.config.property("postgres.password").getString()
     )
+    val databaseUrl = if (isEmbedded) "jdbc:h2:mem:test;DB_CLOSE_DELAY=-1"
+    else environment.config.property("postgres.url").getString()
+    val databaseUser = if (isEmbedded) "root" else environment.config.property("postgres.user").getString()
+    val databasePassword = if (isEmbedded) "" else environment.config.property("postgres.password").getString()
+    CityChangeProcessor.connectionProvider = {
+        DriverManager.getConnection(databaseUrl, databaseUser, databasePassword)
+    }
     val elasticsearch = ElasticsearchClient(
         environment.config.propertyOrNull("elasticsearch.url")?.getString() ?: "http://localhost:9200"
     )
+    CityChangeProcessor.search = elasticsearch
     runCatching {
         val cities = dbConnection.createStatement().executeQuery("SELECT id, name, population FROM cities").let { rs ->
             buildList { while (rs.next()) add(CityView(rs.getInt(1), rs.getString(2), rs.getInt(3))) }
@@ -258,28 +267,22 @@ async function viewConsumedMessages() {
             }
         }
 
-        // POST /demo/cities - create a city
-        post("/demo/cities") {
-            val city = call.receive<Map<String, Any>>()
-            val name = city["name"] as? String ?: throw IllegalArgumentException("name required")
-            val population = city["population"] as? Int ?: throw IllegalArgumentException("population required")
-            withContext(Dispatchers.IO) {
-                val stmt = dbConnection.prepareStatement(
-                    "INSERT INTO cities (name, population) VALUES (?, ?)",
-                    java.sql.Statement.RETURN_GENERATED_KEYS
-                )
-                stmt.setString(1, name)
-                stmt.setInt(2, population)
-                stmt.executeUpdate()
-                val keys = stmt.generatedKeys
-                if (keys.next()) {
-                    val id = keys.getInt(1)
-                    runCatching { elasticsearch.indexCity(CityView(id, name, population)) }
-                        .onFailure { app.log.warn("Unable to index city $id", it) }
-                    call.respondText("Created city with id=${keys.getInt(1)}", ContentType.Text.Plain)
-                } else {
-                    call.respondText("Created city", ContentType.Text.Plain)
-                }
+        rabbitmq {
+            post("/demo/cities") {
+                val city = call.receive<CityCommand>()
+                basicPublish { exchange = "test-exchange"; routingKey = "test-routing-key"; message { CityChangeProcessor.payload(city) } }
+                call.respondText("City change queued")
+            }
+            put("/demo/cities/{id}") {
+                val id = call.parameters["id"]?.toIntOrNull() ?: throw IllegalArgumentException("invalid id")
+                val city = call.receive<CityCommand>().copy(operation = "update", id = id)
+                basicPublish { exchange = "test-exchange"; routingKey = "test-routing-key"; message { CityChangeProcessor.payload(city) } }
+                call.respondText("City change queued")
+            }
+            delete("/demo/cities/{id}") {
+                val id = call.parameters["id"]?.toIntOrNull() ?: throw IllegalArgumentException("invalid id")
+                basicPublish { exchange = "test-exchange"; routingKey = "test-routing-key"; message { CityChangeProcessor.payload(CityCommand("delete", id)) } }
+                call.respondText("City change queued")
             }
         }
 

@@ -12,7 +12,8 @@ import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
-import kotlinx.coroutines.launch
+import kotlinx.coroutines.runBlocking
+import kotlinx.serialization.json.Json
 import java.util.UUID
 
 fun Application.configureRabbitmq() {
@@ -101,8 +102,24 @@ fun Application.configureRabbitmq() {
                     val body = message.body
                     log.info("RabbitMQ consumer received: $body")
                     ConsumerState.consumedMessages.add(body)
-                    launch {
-                        ConsumerState.onMessage(body)
+                    try {
+                        val normalizedBody = if (body.startsWith("\"")) {
+                            Json.decodeFromString<String>(body)
+                        } else {
+                            body
+                        }
+                        if (normalizedBody.startsWith("CITY_CHANGE:")) {
+                            runBlocking(Dispatchers.IO) {
+                                CityChangeProcessor.apply(
+                                    Json.decodeFromString(normalizedBody.removePrefix("CITY_CHANGE:"))
+                                )
+                            }
+                            log.info("RabbitMQ city change persisted successfully")
+                        } else {
+                            ConsumerState.onMessage(body)
+                        }
+                    } catch (error: Throwable) {
+                        log.error("Failed to persist RabbitMQ message: $body", error)
                     }
                 }
 

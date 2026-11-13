@@ -1,6 +1,6 @@
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import { useMessages } from '../hooks/useMessages'
-import { fetchCities, publishMessage, searchCities } from '../services/demoApi'
+import { deleteCity, fetchCities, publishMessage, saveCity, searchCities } from '../services/demoApi'
 import type { City } from '../types/demo'
 
 export function App() {
@@ -9,16 +9,20 @@ export function App() {
   const [publishing, setPublishing] = useState(false)
   const [query, setQuery] = useState('')
   const [searchResults, setSearchResults] = useState<City[]>([])
-  const { messages, connected } = useMessages()
+  const [editing, setEditing] = useState<City | null>(null)
+  const [name, setName] = useState('')
+  const [population, setPopulation] = useState('')
 
-  const loadCities = async () => {
+  const loadCities = useCallback(async () => {
     try {
       setCities(await fetchCities())
       setStatus('Cities loaded')
     } catch (error) {
       setStatus(error instanceof Error ? error.message : 'Unable to load cities')
     }
-  }
+  }, [])
+
+  const { messages, connected } = useMessages(loadCities)
 
   useEffect(() => { void loadCities() }, [])
 
@@ -32,6 +36,16 @@ export function App() {
     }, 20)
     return () => { window.clearTimeout(timer); controller.abort() }
   }, [query])
+
+  const submitCity = async () => {
+    try { await saveCity({ name, population: Number(population) }, editing?.id); setName(''); setPopulation(''); setEditing(null); setStatus('City change queued') }
+    catch (error) { setStatus(error instanceof Error ? error.message : 'Unable to save city') }
+  }
+
+  const removeCity = async (id: number) => {
+    try { await deleteCity(id); setStatus('City deletion queued') }
+    catch (error) { setStatus(error instanceof Error ? error.message : 'Unable to delete city') }
+  }
 
   const handlePublish = async () => {
     setPublishing(true)
@@ -52,10 +66,15 @@ export function App() {
         <p className="subtitle">A lightweight presentation layer for the existing city and RabbitMQ demo.</p>
       </header>
       <section className="card">
-        <div className="section-heading"><h2>Cities</h2><button onClick={() => void loadCities()}>Refresh</button></div>
         <input aria-label="Search cities by name" placeholder="Search by name" value={query} onChange={(event) => setQuery(event.target.value)} />
-        {query.trim() ? (searchResults.length === 0 ? <p className="muted">No matching cities.</p> : <ul>{searchResults.map((city) => <li key={city.id}>{city.name} — {city.population.toLocaleString()}</li>)}</ul>) : (cities.length === 0 ? <p className="muted">No cities found.</p> : <ul>{cities.map((city) => <li key={city.id}>{city.name} — {city.population.toLocaleString()}</li>)}</ul>)}
+        {query.trim() ? (searchResults.length === 0 ? <p className="muted">No matching cities.</p> : <ul>{searchResults.map((city) => <li key={city.id}>{city.name} — {city.population.toLocaleString()}</li>)}</ul>) : (cities.length === 0 ? <p className="muted">No cities found.</p> : <ul>{cities.map((city) => <li key={city.id}>{city.name} — {city.population.toLocaleString()} <button onClick={() => { setEditing(city); setName(city.name); setPopulation(String(city.population)) }}>Edit</button> <button onClick={() => void removeCity(city.id)}>Delete</button></li>)}</ul>)}
       </section>
+
+      <section className="card">
+        <div className="section-heading"><h2>Cities</h2><button onClick={() => void loadCities()}>Refresh</button></div>
+        <div className="section-heading"><input placeholder="City name" value={name} onChange={(event) => setName(event.target.value)} /><input type="number" placeholder="Population" value={population} onChange={(event) => setPopulation(event.target.value)} /><button onClick={() => void submitCity()}>{editing ? 'Update' : 'Add'} city</button></div>
+      </section>
+
       <section className="card">
         <div className="section-heading"><h2>RabbitMQ messages</h2><span className={connected ? 'connected' : 'muted'}>{connected ? 'Connected' : 'Reconnecting…'}</span></div>
         <button onClick={() => void handlePublish()} disabled={publishing}>{publishing ? 'Publishing…' : 'Publish message'}</button>

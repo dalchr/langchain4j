@@ -8,7 +8,7 @@ function websocketUrl(): string {
   return `${protocol}//${window.location.host}/demo/ws`
 }
 
-export function useMessages(): { messages: WsMessage[]; connected: boolean } {
+export function useMessages(onCityChanged?: () => void): { messages: WsMessage[]; connected: boolean } {
   const [messages, setMessages] = useState<WsMessage[]>([])
   const [connected, setConnected] = useState(false)
   const socketRef = useRef<WebSocket | null>(null)
@@ -25,7 +25,8 @@ export function useMessages(): { messages: WsMessage[]; connected: boolean } {
       socket.onmessage = (event) => {
         try {
           const message = JSON.parse(event.data) as WsMessage
-          if (typeof message.body === 'string') setMessages((current) => [...current, message])
+          if (message.body.includes('city-changed')) onCityChanged?.()
+          else if (typeof message.body === 'string') setMessages((current) => [...current, message])
         } catch {
           // Ignore malformed messages while keeping the connection alive.
         }
@@ -44,7 +45,7 @@ export function useMessages(): { messages: WsMessage[]; connected: boolean } {
       socketRef.current?.close()
       socketRef.current = null
     }
-  }, [])
+  }, [onCityChanged])
 
   return { messages, connected }
 }

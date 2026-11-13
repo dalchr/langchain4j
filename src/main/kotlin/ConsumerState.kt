@@ -6,6 +6,9 @@ import kotlinx.serialization.Serializable
 @Serializable
 data class WsMessage(val body: String)
 
+@Serializable
+data class CityChangedMessage(val event: String = "city-changed")
+
 object ConsumerState {
     val consumedMessages = mutableListOf<String>()
     private val messageChannel = Channel<WsMessage>(Channel.UNLIMITED)

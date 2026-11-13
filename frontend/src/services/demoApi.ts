@@ -18,3 +18,17 @@ export async function publishMessage(): Promise<string> {
   if (!response.ok) throw new Error(text || `Publish failed (${response.status})`)
   return text
 }
+
+export async function saveCity(city: { name: string; population: number }, id?: number): Promise<string> {
+  const response = await fetch(id === undefined ? '/demo/cities' : `/demo/cities/${id}`, { method: id === undefined ? 'POST' : 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ operation: id === undefined ? 'create' : 'update', ...city }) })
+  const text = await response.text()
+  if (!response.ok) throw new Error(text || `Save failed (${response.status})`)
+  return text
+}
+
+export async function deleteCity(id: number): Promise<string> {
+  const response = await fetch(`/demo/cities/${id}`, { method: 'DELETE' })
+  const text = await response.text()
+  if (!response.ok) throw new Error(text || `Delete failed (${response.status})`)
+  return text
+}
