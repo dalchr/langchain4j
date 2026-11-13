@@ -48,6 +48,19 @@ class ElasticsearchClient(private val baseUrl: String) {
         }
     }
 
+    fun listCities(): List<CityView> {
+        val response = request("POST", "/$index/_search", buildJsonObject {
+            put("size", 10000)
+            putJsonObject("query") { putJsonObject("match_all") {} }
+        }.toString())
+        val hits = Json.parseToJsonElement(response).jsonObject["hits"]?.jsonObject
+            ?.get("hits")?.jsonArray ?: return emptyList()
+        return hits.mapNotNull { hit ->
+            val source = hit.jsonObject["_source"]?.jsonObject ?: return@mapNotNull null
+            CityView(source["id"]!!.jsonPrimitive.int, source["name"]!!.jsonPrimitive.content, source["population"]!!.jsonPrimitive.int)
+        }
+    }
+
     private fun request(method: String, path: String, body: String?, allowStatus: Set<Int> = emptySet()): String {
         val builder = HttpRequest.newBuilder(URI.create(baseUrl.trimEnd('/') + path))
             .method(method, body?.let(HttpRequest.BodyPublishers::ofString) ?: HttpRequest.BodyPublishers.noBody())

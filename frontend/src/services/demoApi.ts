@@ -39,6 +39,17 @@ export interface AgentStreamEvent {
   error?: string
 }
 
+export async function resetAgentConversation(conversationId: string): Promise<void> {
+  const response = await fetch('/demo/agent/conversation/reset', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ conversationId }),
+  })
+  if (!response.ok) {
+    throw new Error((await response.text()) || `Conversation reset failed (${response.status})`)
+  }
+}
+
 export async function streamAgentMessage(
   conversationId: string,
   message: string,

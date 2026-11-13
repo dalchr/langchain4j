@@ -46,6 +46,7 @@ fun Application.configureDemo() {
         modelName = environment.config.propertyOrNull("llm.model-name")?.getString() ?: "openai/gpt-oss-20b",
         apiKey = System.getenv("LLM_API_KEY") ?: "not-needed",
         searchCities = elasticsearch::searchByName,
+        listCities = elasticsearch::listCities,
         enqueueChange = { command ->
             runBlocking(Dispatchers.IO) { CityCommandPublisher.publish(command) }
         },

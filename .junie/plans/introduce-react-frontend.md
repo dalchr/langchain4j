@@ -120,24 +120,27 @@ The `/app/` page presents the streamed conversation and the repository documents
 - Document LLM configuration, conversation behavior, and the stream endpoint.
 - Run backend and frontend verification.
 
-### * Step 5: Add the LangChain4j streaming agent and city tools
-The Ktor backend streams model responses and supports bounded conversation context plus safe city create/update/delete tools.
+### ✓ Step 5: Add the LangChain4j streaming agent and city tools
+The Ktor backend streams model responses and supports bounded conversation context, safe city create/update/delete tools, city-context lookup/listing, and explicit conversation reset.
 
 - Add LangChain4j OpenAI-compatible streaming dependencies and configuration for the provided endpoint/model, keeping credentials configurable and out of source control.
 - Add the SSE chat route, request/response types, bounded per-conversation memory, and robust error/completion signaling.
 - Add city tools that use Elasticsearch name lookup, reject missing/ambiguous targets, validate required create population, and invoke the existing persistence/index/WebSocket pipeline.
+- Add city-list and specific-city lookup tools so city-related conversations can use current indexed names/populations; add a reset route that removes memory and pending operation state for a conversation.
 - Add backend tests for conversation input validation, city resolution/missing fields, and unchanged existing routes as feasible without a live LLM.
 
-###   Step 6: Add the React conversation interface
+### ✓ Step 6: Add the React conversation interface
 The React page streams assistant output into a conversation panel, positioned responsively alongside the existing demo tools on large screens.
 
 - Add a chat service that POSTs messages and incrementally parses SSE response events.
 - Add conversation state and input UI, preserving conversation ID across turns and rendering partial tokens as they arrive.
+- Add a Restart action that resets backend memory and pending state and starts a fresh visible conversation.
 - Place the conversation beside the city/search/RabbitMQ area on large screens and below it on smaller screens.
 - Keep city list refresh driven by the existing WebSocket `city-changed` event after agent mutations.
 
-###   Step 7: Document and validate the agent integration
+### ✓ Step 7: Document and validate the agent integration
 The README documents model endpoint configuration and the supported streaming/tool workflow, and backend/frontend validation passes.
 
 - Document the model base URL/model configuration, required runtime setup, streaming protocol, conversation-memory limits, and tool behavior.
+- Document the Restart control and the city-list/specific-city context tools.
 - Run Gradle tests and frontend type-check/build; verify stream protocol and UI behavior with available local tooling, clearly noting any external LLM/Elasticsearch/RabbitMQ constraints.

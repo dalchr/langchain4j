@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { FormEvent } from 'react'
 import { useMessages } from '../hooks/useMessages'
-import { deleteCity, fetchCities, publishMessage, saveCity, searchCities, streamAgentMessage } from '../services/demoApi'
+import { deleteCity, fetchCities, publishMessage, resetAgentConversation, saveCity, searchCities, streamAgentMessage } from '../services/demoApi'
 import type { City } from '../types/demo'
 
 interface ConversationEntry {
@@ -29,6 +29,8 @@ export function App() {
   const [conversation, setConversation] = useState<ConversationEntry[]>([])
   const [agentInput, setAgentInput] = useState('')
   const [sendingAgentMessage, setSendingAgentMessage] = useState(false)
+  const [restartingConversation, setRestartingConversation] = useState(false)
+  const [agentStatus, setAgentStatus] = useState('')
   const conversationRef = useRef<HTMLDivElement>(null)
 
   const loadCities = useCallback(async () => {
@@ -93,6 +95,7 @@ export function App() {
       { id: responseId, role: 'assistant', content: '' },
     ])
     setAgentInput('')
+    setAgentStatus('')
     setSendingAgentMessage(true)
     try {
       await streamAgentMessage(conversationId, message, (event) => {
@@ -112,6 +115,21 @@ export function App() {
         : entry))
     } finally {
       setSendingAgentMessage(false)
+    }
+  }
+
+  const restartConversation = async () => {
+    if (sendingAgentMessage || restartingConversation) return
+    setRestartingConversation(true)
+    setAgentStatus('')
+    try {
+      await resetAgentConversation(conversationId)
+      setConversation([])
+      setAgentInput('')
+    } catch (error) {
+      setAgentStatus(error instanceof Error ? error.message : 'Unable to restart the conversation.')
+    } finally {
+      setRestartingConversation(false)
     }
   }
 
@@ -143,8 +161,9 @@ export function App() {
         </div>
 
         <aside className="card assistant-card">
-          <h2>City assistant</h2>
+          <div className="section-heading"><h2>City assistant</h2><button type="button" onClick={() => void restartConversation()} disabled={sendingAgentMessage || restartingConversation}>{restartingConversation ? 'Restarting…' : 'Restart'}</button></div>
           <p className="muted">Ask to create, update, or delete a city. Changes are shared with connected clients.</p>
+          {agentStatus && <p className="muted" role="status">{agentStatus}</p>}
           <div className="conversation" ref={conversationRef} aria-live="polite" aria-label="Assistant conversation">
             {conversation.length === 0 ? <p className="muted">Start a conversation. For example, “Create Oslo” or “Update Oslo to a population of 710000.”</p> : conversation.map((entry) => (
               <article className={`chat-message ${entry.role}`} key={entry.id}>
@@ -154,8 +173,8 @@ export function App() {
             ))}
           </div>
           <form className="chat-form" onSubmit={(event) => void sendAgentMessage(event)}>
-            <textarea aria-label="Message the city assistant" value={agentInput} onChange={(event) => setAgentInput(event.target.value)} placeholder="Message the city assistant" rows={3} disabled={sendingAgentMessage} />
-            <button type="submit" disabled={sendingAgentMessage || !agentInput.trim()}>{sendingAgentMessage ? 'Responding…' : 'Send'}</button>
+            <textarea aria-label="Message the city assistant" value={agentInput} onChange={(event) => setAgentInput(event.target.value)} placeholder="Message the city assistant" rows={3} disabled={sendingAgentMessage || restartingConversation} />
+            <button type="submit" disabled={sendingAgentMessage || restartingConversation || !agentInput.trim()}>{sendingAgentMessage ? 'Responding…' : 'Send'}</button>
           </form>
         </aside>
       </div>

@@ -2,9 +2,11 @@ package com.example
 
 import dev.langchain4j.agent.tool.P
 import dev.langchain4j.agent.tool.Tool
+import dev.langchain4j.agent.tool.ToolExecutionRequest
 import dev.langchain4j.agent.tool.ToolMemoryId
 import dev.langchain4j.data.message.AiMessage
 import dev.langchain4j.data.message.UserMessage
+import dev.langchain4j.data.message.ToolExecutionResultMessage
 import dev.langchain4j.memory.ChatMemory
 import dev.langchain4j.memory.chat.MessageWindowChatMemory
 import dev.langchain4j.model.openai.OpenAiStreamingChatModel
@@ -44,6 +46,14 @@ internal data class AgentConversation(
     var pendingCreateName: String? = null,
 )
 
+internal fun recoverFromUnknownCityTool(request: ToolExecutionRequest): ToolExecutionResultMessage =
+    ToolExecutionResultMessage.toolExecutionResultMessage(
+        request,
+        "The tool name '${request.name()}' is not registered. Use only these exact tool names: " +
+            "listCities, lookupCityByName, createCity, updateCity, deleteCity. " +
+            "Retry the requested action using the appropriate exact tool name.",
+    )
+
 internal class AgentConversationRegistry(
     private val maxMessages: Int = 20,
 ) {
@@ -52,12 +62,21 @@ internal class AgentConversationRegistry(
     fun get(id: String): AgentConversation = conversations.computeIfAbsent(id) {
         AgentConversation(MessageWindowChatMemory.builder().id(it).maxMessages(maxMessages).build())
     }
+
+    suspend fun reset(id: String) {
+        val conversation = get(id)
+        conversation.lock.withLock {
+            conversation.memory.clear()
+            conversation.pendingCreateName = null
+        }
+    }
 }
 
 private interface CityAssistant {
     @SystemMessage(
         """
-        You help manage the cities in this application. Use the available city tools for every requested change.
+        You help manage the cities in this application. Whenever the user asks about cities or discusses a city, use the city tools to ground your answer in current registered data. For general city questions, list all known cities and populations. For a specific city, look it up by name and state whether it exists and its current registered population.
+        Use the available city tools for every requested change.
         For update and delete requests, identify the city by its exact name using the tools; never ask for or invent a database ID.
         For a create request without a population, call createCity with the population omitted so the tool can ask a follow-up question.
         Never invent a population. If a city name is missing or a name does not resolve uniquely, ask the user to clarify.
@@ -69,8 +88,21 @@ private interface CityAssistant {
 internal class CityAgentTools(
     private val conversations: AgentConversationRegistry,
     private val searchCities: (String) -> List<CityView>,
+    private val listCities: () -> List<CityView>,
     private val enqueueChange: (CityCommand) -> Unit,
 ) {
+    @Tool("List all cities currently registered and their populations. Use this for general questions about the cities.")
+    fun listCities(): String = runCatching {
+        listCities.invoke().joinToString("\n") { "${it.name}: ${it.population}" }
+            .ifEmpty { "No cities are currently registered." }
+    }.getOrElse { "City data is currently unavailable." }
+
+    @Tool("Look up a specific city by name and report whether it exists and its current registered population.")
+    fun lookupCityByName(@P(name = "name", value = "The city name to look up") name: String): String {
+        val lookup = lookupCity(name)
+        val city = lookup.city ?: return lookup.failure!!
+        return "${city.name} exists and its current registered population is ${city.population}."
+    }
     @Tool("Create a city. If population is not provided, ask the user for it before creating the city.")
     fun createCity(
         @P("The city's name") name: String,
@@ -148,10 +180,11 @@ class CityAgent(
     modelName: String,
     apiKey: String,
     searchCities: (String) -> List<CityView>,
+    listCities: () -> List<CityView>,
     enqueueChange: (CityCommand) -> Unit,
 ) {
     private val conversations = AgentConversationRegistry()
-    private val tools = CityAgentTools(conversations, searchCities, enqueueChange)
+    private val tools = CityAgentTools(conversations, searchCities, listCities, enqueueChange)
     private val assistant = AiServices.builder(CityAssistant::class.java)
         .streamingChatModel(
             OpenAiStreamingChatModel.builder()
@@ -163,10 +196,24 @@ class CityAgent(
         )
         .chatMemoryProvider { memoryId -> conversations.get(memoryId.toString()).memory }
         .tools(tools)
+        .hallucinatedToolNameStrategy(::recoverFromUnknownCityTool)
         .build()
     private val log = application.log
 
     fun Route.routes() {
+        post("/demo/agent/conversation/reset") {
+            val request = runCatching { call.receive<AgentResetRequest>() }.getOrElse {
+                call.respond(HttpStatusCode.BadRequest, "Invalid conversation reset request")
+                return@post
+            }
+            if (request.conversationId.isBlank() || request.conversationId.length > 128) {
+                call.respond(HttpStatusCode.BadRequest, "A valid conversation ID is required")
+                return@post
+            }
+            conversations.reset(request.conversationId)
+            call.respond(HttpStatusCode.OK, "Conversation restarted")
+        }
+
         post("/demo/agent/chat/stream") {
             val request = runCatching { call.receive<AgentChatRequest>() }.getOrElse {
                 call.respond(HttpStatusCode.BadRequest, "Invalid chat request")
@@ -230,6 +277,9 @@ class CityAgent(
         flush()
     }
 }
+
+@Serializable
+data class AgentResetRequest(val conversationId: String)
 
 private fun openAiBaseUrl(endpoint: String): String = endpoint.trimEnd('/')
     .removeSuffix("/chat/completions")

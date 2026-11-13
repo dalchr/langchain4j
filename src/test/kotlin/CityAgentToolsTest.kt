@@ -4,6 +4,9 @@ import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
+import dev.langchain4j.data.message.UserMessage
+import dev.langchain4j.agent.tool.ToolExecutionRequest
+import kotlinx.coroutines.runBlocking
 
 class CityAgentToolsTest {
     private val cities = listOf(
@@ -15,6 +18,7 @@ class CityAgentToolsTest {
     private val tools = CityAgentTools(
         conversations = conversations,
         searchCities = { query -> cities.filter { it.name.contains(query, ignoreCase = true) } },
+        listCities = { cities },
         enqueueChange = commands::add,
     )
 
@@ -63,5 +67,42 @@ class CityAgentToolsTest {
         assertEquals("I cannot complete creating Reykjavik without a non-negative whole-number population. What is its population?", answer)
         assertTrue(commands.isEmpty())
         assertEquals("Reykjavik", conversations.get("conversation-1").pendingCreateName)
+    }
+
+    @Test
+    fun `city context tools provide all cities and a specific current population`() {
+        assertEquals("Oslo: 709037\nOslo East: 1200", tools.listCities())
+        assertEquals(
+            "Oslo exists and its current registered population is 709037.",
+            tools.lookupCityByName("Oslo"),
+        )
+    }
+
+    @Test
+    fun `conversation reset clears history and pending create`() = runBlocking {
+        val conversation = conversations.get("conversation-1")
+        conversation.memory.add(UserMessage.from("previous city question"))
+        conversation.pendingCreateName = "Reykjavik"
+
+        conversations.reset("conversation-1")
+
+        assertTrue(conversation.memory.messages().isEmpty())
+        assertNull(conversation.pendingCreateName)
+    }
+
+    @Test
+    fun `unknown tool names are returned to the model for recovery instead of failing`() {
+        val result = recoverFromUnknownCityTool(
+            ToolExecutionRequest.builder()
+                .id("call-1")
+                .name("createCity<|channel|>json")
+                .arguments("{\"name\":\"London\",\"population\":10000000}")
+                .build(),
+        )
+
+        assertEquals("createCity<|channel|>json", result.toolName())
+        assertTrue(result.text().contains("createCity, updateCity, deleteCity"))
+        assertTrue(result.text().contains("Retry the requested action"))
+        assertTrue(commands.isEmpty())
     }
 }
