@@ -157,6 +157,7 @@ class AuthenticationTest {
     fun `production cannot enable development authentication`() {
         val error = runCatching {
             AuthenticationService.fromEnvironment(
+                null,
                 mapOf(
                     "APP_ENV" to "production",
                     "DEV_AUTH_ENABLED" to "true",
@@ -171,6 +172,7 @@ class AuthenticationTest {
 
         val missingEnvironmentError = runCatching {
             AuthenticationService.fromEnvironment(
+                null,
                 mapOf("DEV_AUTH_ENABLED" to "true", "DEV_AUTH_USERNAME" to "chris", "DEV_AUTH_PASSWORD" to "chris"),
             )
         }.exceptionOrNull()

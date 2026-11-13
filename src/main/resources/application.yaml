@@ -28,3 +28,12 @@ elasticsearch:
 llm:
   base-url: http://finndet-host02:8000/v1/chat/completions
   model-name: openai/gpt-oss-20b
+
+app:
+  env: development
+
+auth:
+  dev:
+    enabled: true
+    username: admin
+    password: admin

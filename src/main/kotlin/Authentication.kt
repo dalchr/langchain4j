@@ -165,18 +165,38 @@ internal class AuthenticationService(
     }
 
     companion object {
-        fun fromEnvironment(environment: Map<String, String> = System.getenv()): AuthenticationService {
-            val isDevelopment = environment["APP_ENV"].equals("development", ignoreCase = true)
-            val isProduction = environment["APP_ENV"].equals("production", ignoreCase = true)
-            val enabled = environment["DEV_AUTH_ENABLED"].equals("true", ignoreCase = true)
+        fun fromEnvironment(
+            application: Application? = null,
+            environment: Map<String, String> = System.getenv(),
+        ): AuthenticationService {
+            fun getString(key: String, envKey: String): String? {
+                val envValue = environment[envKey]
+                if (envValue != null) return envValue
+                if (application != null) {
+                    return application.environment.config.propertyOrNull(key)?.getString()?.takeIf(String::isNotBlank)
+                }
+                return null
+            }
+            fun getBool(key: String, envKey: String): Boolean {
+                val envValue = environment[envKey]
+                if (envValue != null) return envValue.equals("true", ignoreCase = true)
+                if (application != null) {
+                    return application.environment.config.propertyOrNull(key)?.getString()?.toBoolean() ?: false
+                }
+                return false
+            }
+
+            val isDevelopment = getString("app.env", "APP_ENV")?.equals("development", ignoreCase = true) ?: false
+            val isProduction = getString("app.env", "APP_ENV")?.equals("production", ignoreCase = true) ?: false
+            val enabled = getBool("auth.dev.enabled", "DEV_AUTH_ENABLED")
             check(!isProduction || !enabled) { "Development authentication cannot be enabled in production" }
             check(!enabled || isDevelopment) { "Development authentication requires APP_ENV=development" }
 
             val account = if (enabled) {
-                val username = requireNotNull(environment["DEV_AUTH_USERNAME"]?.takeIf(String::isNotBlank)) {
+                val username = requireNotNull(getString("auth.dev.username", "DEV_AUTH_USERNAME")?.takeIf(String::isNotBlank)) {
                     "DEV_AUTH_USERNAME is required when DEV_AUTH_ENABLED=true"
                 }
-                val password = requireNotNull(environment["DEV_AUTH_PASSWORD"]?.takeIf(String::isNotEmpty)) {
+                val password = requireNotNull(getString("auth.dev.password", "DEV_AUTH_PASSWORD")?.takeIf(String::isNotEmpty)) {
                     "DEV_AUTH_PASSWORD is required when DEV_AUTH_ENABLED=true"
                 }
                 LocalAccount(
@@ -206,7 +226,7 @@ fun Application.configureAuthentication() {
     val encryptionKey = sessionKey(environment, "SESSION_ENCRYPTION_KEY", isProduction)
     val signingKey = sessionKey(environment, "SESSION_SIGNING_KEY", isProduction)
     configureAuthentication(
-        authenticationService = AuthenticationService.fromEnvironment(environment),
+        authenticationService = AuthenticationService.fromEnvironment(this, environment),
         secureCookie = !isDevelopment,
         encryptionKey = encryptionKey,
         signingKey = signingKey,
