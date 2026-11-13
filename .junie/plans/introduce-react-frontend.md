@@ -17,6 +17,7 @@ Introduce a lightweight React + TypeScript frontend alongside the existing singl
 - Add a LangChain4j-backed streaming chat endpoint for the configured OpenAI-compatible `openai/gpt-oss-20b` model.
 - Expose guarded city create, update, and delete tools that resolve existing cities through Elasticsearch and reuse the database/index/WebSocket change pipeline.
 - Retain bounded conversation memory and support asking for a missing population before creating a city.
+- Track each successfully queued city create, update, and delete in the conversation’s operation history, preserving event order alongside chat context so later questions can reason about actions even if later operations reverse them.
 
 **Out of scope**
 - Introducing Spring Boot, Spring Security, GraphQL, Apollo, GraphQL Code Generator, or a second backend server; none exists in this repository.

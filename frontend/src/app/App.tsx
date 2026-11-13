@@ -107,6 +107,10 @@ export function App() {
           setConversation((current) => current.map((entry) => entry.id === responseId
             ? { ...entry, content: event.error ?? 'The assistant is temporarily unavailable.' }
             : entry))
+        } else if (event.type === 'done') {
+          setConversation((current) => current.map((entry) => entry.id === responseId && !entry.content
+            ? { ...entry, content: 'The assistant returned an empty response. Please try again.' }
+            : entry))
         }
       })
     } catch (error) {

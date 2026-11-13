@@ -32,6 +32,7 @@ import kotlinx.coroutines.sync.withLock
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 import java.time.Duration
+import java.time.Instant
 import java.util.concurrent.ConcurrentHashMap
 
 @Serializable
@@ -44,15 +45,27 @@ internal data class AgentConversation(
     val memory: ChatMemory,
     val lock: Mutex = Mutex(),
     var pendingCreateName: String? = null,
+    val activityHistory: MutableList<AgentHistoryEntry> = mutableListOf(),
 )
+
+internal data class AgentHistoryEntry(val role: String, val content: String, val timestamp: Instant = Instant.now())
 
 internal fun recoverFromUnknownCityTool(request: ToolExecutionRequest): ToolExecutionResultMessage =
     ToolExecutionResultMessage.toolExecutionResultMessage(
         request,
         "The tool name '${request.name()}' is not registered. Use only these exact tool names: " +
-            "listCities, lookupCityByName, createCity, updateCity, deleteCity. " +
+            "listCities, lookupCityByName, operationHistory, createCity, updateCity, deleteCity. " +
             "Retry the requested action using the appropriate exact tool name.",
     )
+
+internal fun populationFromReply(message: String): Int? {
+    val values = Regex("(?<![\\p{L}\\p{N}])-?\\d[\\d,]*(?![\\p{L}\\p{N}])")
+        .findAll(message)
+        .map { it.value.replace(",", "").toIntOrNull() }
+        .toList()
+    if (values.size != 1) return null
+    return values.single()?.takeIf { it >= 0 }
+}
 
 internal class AgentConversationRegistry(
     private val maxMessages: Int = 20,
@@ -68,6 +81,7 @@ internal class AgentConversationRegistry(
         conversation.lock.withLock {
             conversation.memory.clear()
             conversation.pendingCreateName = null
+            conversation.activityHistory.clear()
         }
     }
 }
@@ -76,6 +90,7 @@ private interface CityAssistant {
     @SystemMessage(
         """
         You help manage the cities in this application. Whenever the user asks about cities or discusses a city, use the city tools to ground your answer in current registered data. For general city questions, list all known cities and populations. For a specific city, look it up by name and state whether it exists and its current registered population.
+        When asked about past actions or accidental changes, consult the operation history, which includes this conversation's queued assistant actions and committed changes made through the dashboard. Treat queued assistant operations as requests, not proof that asynchronous database persistence succeeded.
         Use the available city tools for every requested change.
         For update and delete requests, identify the city by its exact name using the tools; never ask for or invent a database ID.
         For a create request without a population, call createCity with the population omitted so the tool can ask a follow-up question.
@@ -115,7 +130,15 @@ internal class CityAgentTools(
             return "What is the population for \"${name.trim()}\"?"
         }
         return runCatching {
-            enqueueChange(CityCommand(operation = "create", name = name.trim(), population = population))
+            enqueueChange(
+                CityCommand(
+                    operation = "create",
+                    name = name.trim(),
+                    population = population,
+                    conversationId = conversationId,
+                ),
+            )
+            recordOperation(conversationId, "Created ${name.trim()} with population $population")
             conversations.get(conversationId).pendingCreateName = null
             "Queued creation of ${name.trim()} with a population of $population."
         }.getOrElse { "I couldn't create ${name.trim()}: ${it.message ?: "the city update failed"}." }
@@ -126,22 +149,31 @@ internal class CityAgentTools(
         @P("The current exact name of the city to update") existingName: String,
         @P("The updated city name") name: String,
         @P("The updated population") population: Int,
+        @ToolMemoryId conversationId: String,
     ): String {
         if (name.isBlank() || population < 0) return "A non-empty city name and a non-negative population are required."
         val lookup = lookupCity(existingName)
         val city = lookup.city ?: return lookup.failure!!
         return runCatching {
-            enqueueChange(CityCommand("update", city.id, name.trim(), population))
+            enqueueChange(CityCommand("update", city.id, name.trim(), population, conversationId))
+            recordOperation(
+                conversationId,
+                "Updated ${city.name} to ${name.trim()}: population ${city.population} → $population",
+            )
             "Queued update of ${city.name} to ${name.trim()} with a population of $population."
         }.getOrElse { "I couldn't update ${city.name}: ${it.message ?: "the city update failed"}." }
     }
 
     @Tool("Delete a city by its exact name. Search for the city first; do not use or request a database ID.")
-    fun deleteCity(@P("The exact name of the city to delete") name: String): String {
+    fun deleteCity(
+        @P("The exact name of the city to delete") name: String,
+        @ToolMemoryId conversationId: String,
+    ): String {
         val lookup = lookupCity(name)
         val city = lookup.city ?: return lookup.failure!!
         return runCatching {
-            enqueueChange(CityCommand("delete", id = city.id))
+            enqueueChange(CityCommand("delete", id = city.id, conversationId = conversationId))
+            recordOperation(conversationId, "Deleted ${city.name} with population ${city.population}")
             "Queued deletion of ${city.name}."
         }.getOrElse { "I couldn't delete ${city.name}: ${it.message ?: "the city update failed"}." }
     }
@@ -153,10 +185,43 @@ internal class CityAgentTools(
             return "I cannot complete creating $name without a non-negative whole-number population. What is its population?"
         }
         return runCatching {
-            enqueueChange(CityCommand(operation = "create", name = name, population = population))
+            enqueueChange(CityCommand(operation = "create", name = name, population = population, conversationId = conversationId))
+            recordOperation(conversationId, "Created $name with population $population")
             conversation.pendingCreateName = null
             "Queued creation of $name with a population of $population."
         }.getOrElse { "I couldn't create $name: ${it.message ?: "the city update failed"}." }
+    }
+
+    @Tool("Review this conversation's messages and city operations, including committed changes made through the dashboard. Use this for questions about what was previously created, updated, or deleted.")
+    fun operationHistory(@ToolMemoryId conversationId: String): String {
+        val history = conversations.get(conversationId).activityHistory
+        val entries = (history.filter { it.role != "city_operation" } +
+            CityOperationHistory.snapshot()
+                .filter { it.conversationId == null }
+                .map { AgentHistoryEntry("external_city_operation", it.description, it.timestamp) } +
+            history.filter { it.role == "city_operation" })
+            .sortedBy { it.timestamp }
+        if (entries.isEmpty()) return "No city changes have been queued in this conversation."
+        return entries.mapIndexed { index, operation ->
+            val label = when (operation.role) {
+                "user" -> "User"
+                "assistant" -> "Assistant"
+                "city_operation" -> "City operation (queued)"
+                "external_city_operation" -> "City operation (committed outside the assistant)"
+                else -> "City operation (queued)"
+            }
+            "${index + 1}. $label: ${operation.content}"
+        }.joinToString("\n")
+    }
+
+    fun recordMessage(conversationId: String, role: String, content: String) {
+        val history = conversations.get(conversationId).activityHistory
+        if (history.size == MAX_CONVERSATION_HISTORY) history.removeAt(0)
+        history.add(AgentHistoryEntry(role, content))
+    }
+
+    private fun recordOperation(conversationId: String, description: String) {
+        recordMessage(conversationId, "city_operation", description)
     }
 
     private fun lookupCity(name: String): CityLookup {
@@ -172,6 +237,10 @@ internal class CityAgentTools(
     }
 
     private data class CityLookup(val city: CityView? = null, val failure: String? = null)
+
+    private companion object {
+        const val MAX_CONVERSATION_HISTORY = 100
+    }
 }
 
 class CityAgent(
@@ -229,8 +298,11 @@ class CityAgent(
             call.respondBytesWriter(ContentType.Text.EventStream) {
                 val conversation = conversations.get(request.conversationId)
                 conversation.lock.withLock {
+                    val requestStartedAt = System.nanoTime()
+                    log.info("Starting LLM chat request for conversation {}", request.conversationId)
+                    tools.recordMessage(request.conversationId, "user", request.message)
                     val pendingName = conversation.pendingCreateName
-                    val population = request.message.trim().replace(",", "").toIntOrNull()
+                    val population = populationFromReply(request.message)
                     val followUp = if (pendingName != null && population != null) {
                         tools.completePendingCreate(request.conversationId, population)
                     } else if (pendingName != null && request.message.trim().equals("cancel", ignoreCase = true)) {
@@ -245,16 +317,38 @@ class CityAgent(
                     if (followUp != null) {
                         conversation.memory.add(UserMessage.from(request.message))
                         conversation.memory.add(AiMessage.from(followUp))
+                        tools.recordMessage(request.conversationId, "assistant", followUp)
                         writeEvent(AgentStreamEvent("token", content = followUp))
                         writeEvent(AgentStreamEvent("done"))
+                        log.info(
+                            "LLM chat completed through pending-create follow-up for conversation {} ({} ms, {} characters)",
+                            request.conversationId,
+                            (System.nanoTime() - requestStartedAt) / 1_000_000,
+                            followUp.length,
+                        )
                     } else {
                         val events = Channel<AgentStreamEvent>(Channel.UNLIMITED)
+                        val responseText = StringBuilder()
                         try {
                             assistant.chat(request.conversationId, request.message)
-                                .onPartialResponse { partial -> events.trySend(AgentStreamEvent("token", content = partial)) }
-                                .onCompleteResponse { events.trySend(AgentStreamEvent("done")); events.close() }
+                                .onPartialResponse { partial ->
+                                    responseText.append(partial)
+                                    events.trySend(AgentStreamEvent("token", content = partial))
+                                }
+                                .onCompleteResponse {
+                                    val response = responseText.toString()
+                                    if (response.isBlank()) {
+                                        log.warn("LLM chat completed without text for conversation {} ({} ms)", request.conversationId, (System.nanoTime() - requestStartedAt) / 1_000_000)
+                                        events.trySend(AgentStreamEvent("error", error = "The assistant returned an empty response. Please try again."))
+                                    } else {
+                                        tools.recordMessage(request.conversationId, "assistant", response)
+                                        log.info("LLM chat completed for conversation {} ({} ms, {} characters)", request.conversationId, (System.nanoTime() - requestStartedAt) / 1_000_000, response.length)
+                                        events.trySend(AgentStreamEvent("done"))
+                                    }
+                                    events.close()
+                                }
                                 .onError { error ->
-                                    log.error("LLM chat request failed", error)
+                                    log.error("LLM chat request failed for conversation {} after {} ms", request.conversationId, (System.nanoTime() - requestStartedAt) / 1_000_000, error)
                                     events.trySend(AgentStreamEvent("error", error = "The assistant is temporarily unavailable."))
                                     events.close()
                                 }

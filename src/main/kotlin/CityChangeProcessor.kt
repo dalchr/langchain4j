@@ -4,9 +4,33 @@ import io.github.damir.denis.tudor.ktor.server.rabbitmq.dsl.*
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 import java.sql.Connection
+import java.time.Instant
+import java.util.Collections
 
 @Serializable
-data class CityCommand(val operation: String, val id: Int? = null, val name: String = "", val population: Int = 0)
+data class CityCommand(
+    val operation: String,
+    val id: Int? = null,
+    val name: String = "",
+    val population: Int = 0,
+    val conversationId: String? = null,
+)
+
+internal data class CityOperationRecord(val description: String, val timestamp: Instant, val conversationId: String?)
+
+internal object CityOperationHistory {
+    private const val MAX_ENTRIES = 500
+    private val entries = Collections.synchronizedList(mutableListOf<CityOperationRecord>())
+
+    fun record(record: CityOperationRecord) {
+        synchronized(entries) {
+            if (entries.size == MAX_ENTRIES) entries.removeAt(0)
+            entries.add(record)
+        }
+    }
+
+    fun snapshot(): List<CityOperationRecord> = synchronized(entries) { entries.toList() }
+}
 
 object CityChangeProcessor {
     lateinit var connectionProvider: () -> Connection
@@ -21,6 +45,14 @@ object CityChangeProcessor {
         connectionProvider().use { connection ->
             try {
                 connection.autoCommit = false
+                val previous = command.id?.let { id ->
+                    connection.prepareStatement("SELECT name, population FROM cities WHERE id = ?").use {
+                        it.setInt(1, id)
+                        it.executeQuery().use { result ->
+                            if (result.next()) CityView(id, result.getString(1), result.getInt(2)) else null
+                        }
+                    }
+                }
                 when (command.operation) {
                     "create" -> connection.prepareStatement("INSERT INTO cities (name, population) VALUES (?, ?)").use {
                         it.setString(1, command.name)
@@ -40,6 +72,16 @@ object CityChangeProcessor {
                     else -> error("Unknown city operation: ${command.operation}")
                 }
                 connection.commit()
+
+                if (command.conversationId == null) {
+                    val description = when (command.operation) {
+                        "create" -> "Created ${command.name} with population ${command.population}"
+                        "update" -> "Updated ${previous?.name ?: command.id} to ${command.name}: population ${previous?.population ?: "unknown"} → ${command.population}"
+                        "delete" -> "Deleted ${previous?.name ?: "city ${command.id}"} with population ${previous?.population ?: "unknown"}"
+                        else -> error("Unknown city operation: ${command.operation}")
+                    }
+                    CityOperationHistory.record(CityOperationRecord(description, Instant.now(), null))
+                }
 
                 val cities = connection.createStatement().use { statement ->
                 statement.executeQuery("SELECT id, name, population FROM cities").use { result ->

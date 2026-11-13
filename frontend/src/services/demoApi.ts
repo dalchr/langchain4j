@@ -70,12 +70,17 @@ export async function streamAgentMessage(
   const reader = response.body.getReader()
   const decoder = new TextDecoder()
   let buffer = ''
+  let receivedTerminalEvent = false
   const dispatch = (frame: string) => {
     const data = frame.split(/\r?\n/)
       .filter((line) => line.startsWith('data:'))
       .map((line) => line.slice(5).trimStart())
       .join('\n')
-    if (data) onEvent(JSON.parse(data) as AgentStreamEvent)
+    if (data) {
+      const event = JSON.parse(data) as AgentStreamEvent
+      if (event.type === 'done' || event.type === 'error') receivedTerminalEvent = true
+      onEvent(event)
+    }
   }
 
   while (true) {
@@ -87,4 +92,5 @@ export async function streamAgentMessage(
     if (done) break
   }
   if (buffer.trim()) dispatch(buffer)
+  if (!receivedTerminalEvent) throw new Error('The assistant response stream ended unexpectedly. Please try again.')
 }
