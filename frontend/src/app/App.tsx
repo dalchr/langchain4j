@@ -3,6 +3,7 @@ import type { FormEvent, RefObject } from 'react'
 import { authenticationErrorMessage, useAuth } from '../auth/AuthContext'
 import { useMessages } from '../hooks/useMessages'
 import { ApiError, deleteCity, fetchCities, publishMessage, resetAgentConversation, saveCity, searchCities, streamAgentMessage } from '../services/demoApi'
+import { generateUuid } from '../lib/uuid'
 import type { City } from '../types/demo'
 
 interface ConversationEntry {
@@ -41,7 +42,7 @@ export function App() {
   const [conversationId] = useState(() => {
     const storedId = window.sessionStorage.getItem('city-agent-conversation-id')
     if (storedId) return storedId
-    const id = window.crypto.randomUUID()
+    const id = generateUuid()
     window.sessionStorage.setItem('city-agent-conversation-id', id)
     return id
   })
@@ -168,8 +169,8 @@ export function App() {
   }, [conversation])
 
   const sendAgentRequest = async (message: string, onComplete?: () => void): Promise<boolean> => {
-    const responseId = window.crypto.randomUUID()
-    const userMessageId = window.crypto.randomUUID()
+    const responseId = generateUuid()
+    const userMessageId = generateUuid()
     setConversation((current) => [
       ...current,
       { id: userMessageId, role: 'user', content: message },

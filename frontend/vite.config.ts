@@ -1,16 +1,20 @@
 import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
 
+const backendHost = process.env.VITE_BACKEND_HOST || 'http://localhost:8080'
+
 export default defineConfig({
   base: '/app/',
   plugins: [react()],
   server: {
+    host: true,
+    allowedHosts: ['finndet-host02'],
     proxy: {
       '/auth': {
-        target: 'http://localhost:8080',
+        target: backendHost,
       },
       '/demo': {
-        target: 'http://localhost:8080',
+        target: backendHost,
         ws: true,
       },
     },
