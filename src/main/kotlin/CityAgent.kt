@@ -137,7 +137,7 @@ internal class CityAgentTools(
     ): String {
         authorizationFailure(conversationId, Permission.CRUD_READ)?.let { return it }
         val lookup = lookupCity(name)
-        val city = lookup.city ?: return lookup.failure!!
+        val city = lookup.city ?: return lookup.failure ?: "No city found with name '$name'."
         return "${city.name} exists and its current registered population is ${city.population}."
     }
     @Tool("Create a city. If population is not provided, ask the user for it before creating the city.")
@@ -190,7 +190,7 @@ internal class CityAgentTools(
                     return "Multiple cities named '$existingName' exist. Specify one by population, e.g.: $list"
                 }
             }
-            lookup.failure != null -> return lookup.failure!!
+            lookup.failure != null -> return lookup.failure
             else -> return "Unknown error looking up city $existingName."
         }
         if (city == null) return "No city found with name '$existingName' and population $disambiguatingPopulation."
@@ -233,7 +233,7 @@ internal class CityAgentTools(
                     return "Multiple cities named '$name' exist. Specify one by population, e.g.: $list"
                 }
             }
-            lookup.failure != null -> return lookup.failure!!
+            lookup.failure != null -> return lookup.failure
             else -> return "Unknown error looking up city $name."
         }
         if (city == null) return "No city found with name '$name' and population $population."
