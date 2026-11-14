@@ -169,17 +169,31 @@ internal class CityAgentTools(
         }.getOrElse { "I couldn't create ${name.trim()}: ${it.message ?: "the city update failed"}." }
     }
 
-    @Tool("Update a city by its current exact name. Search for the city first; do not use or request a database ID.")
+    @Tool("Update a city by its current exact name. If multiple cities share the name, use the population to identify which one.")
     fun updateCity(
         @P("The current exact name of the city to update") existingName: String,
         @P("The updated city name") name: String,
         @P("The updated population") population: Int,
+        @P(value = "The current population of the city to identify it when multiple cities share the same name", defaultValue = "-1") disambiguatingPopulation: Int,
         @ToolMemoryId conversationId: String,
     ): String {
         authorizationFailure(conversationId, Permission.CRUD_UPDATE)?.let { return it }
         if (name.isBlank() || population < 0) return "A non-empty city name and a non-negative population are required."
         val lookup = lookupCity(existingName)
-        val city = lookup.city ?: return lookup.failure!!
+        val city = when {
+            lookup.city != null -> lookup.city
+            lookup.multipleMatches != null -> {
+                if (disambiguatingPopulation >= 0) {
+                    lookup.multipleMatches.firstOrNull { it.population == disambiguatingPopulation }
+                } else {
+                    val list = lookup.multipleMatches.joinToString("; ") { "${it.name} (population: ${it.population})" }
+                    return "Multiple cities named '$existingName' exist. Specify one by population, e.g.: $list"
+                }
+            }
+            lookup.failure != null -> return lookup.failure!!
+            else -> return "Unknown error looking up city $existingName."
+        }
+        if (city == null) return "No city found with name '$existingName' and population $disambiguatingPopulation."
         return runCatching {
             val actor = executionContexts.getValue(conversationId)
             enqueueChange(
@@ -201,14 +215,28 @@ internal class CityAgentTools(
         }.getOrElse { "I couldn't update ${city.name}: ${it.message ?: "the city update failed"}." }
     }
 
-    @Tool("Delete a city by its exact name. Search for the city first; do not use or request a database ID.")
+    @Tool("Delete a city by its exact name. If multiple cities share the name, you may use the population to specify which one.")
     fun deleteCity(
         @P("The exact name of the city to delete") name: String,
+        @P(value = "The population to disambiguate when multiple cities share the same name", defaultValue = "-1") population: Int,
         @ToolMemoryId conversationId: String,
     ): String {
         authorizationFailure(conversationId, Permission.CRUD_DELETE)?.let { return it }
         val lookup = lookupCity(name)
-        val city = lookup.city ?: return lookup.failure!!
+        val city = when {
+            lookup.city != null -> lookup.city
+            lookup.multipleMatches != null -> {
+                if (population >= 0) {
+                    lookup.multipleMatches.firstOrNull { it.population == population }
+                } else {
+                    val list = lookup.multipleMatches.joinToString("; ") { "${it.name} (population: ${it.population})" }
+                    return "Multiple cities named '$name' exist. Specify one by population, e.g.: $list"
+                }
+            }
+            lookup.failure != null -> return lookup.failure!!
+            else -> return "Unknown error looking up city $name."
+        }
+        if (city == null) return "No city found with name '$name' and population $population."
         return runCatching {
             val actor = executionContexts.getValue(conversationId)
             enqueueChange(CityCommand("delete", id = city.id, conversationId = conversationId, actorId = actor.id))
@@ -292,11 +320,15 @@ internal class CityAgentTools(
         return when (exactMatches.size) {
             1 -> CityLookup(city = exactMatches.single())
             0 -> CityLookup(failure = "I couldn't find a city named $name.")
-            else -> CityLookup(failure = "More than one city matches $name; please clarify which city you mean.")
+            else -> CityLookup(multipleMatches = exactMatches)
         }
     }
 
-    private data class CityLookup(val city: CityView? = null, val failure: String? = null)
+    private data class CityLookup(
+        val city: CityView? = null,
+        val failure: String? = null,
+        val multipleMatches: List<CityView>? = null,
+    )
 
     private companion object {
         const val MAX_CONVERSATION_HISTORY = 100

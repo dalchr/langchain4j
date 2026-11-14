@@ -65,7 +65,7 @@ class CityAgentToolsTest {
 
     @Test
     fun `update resolves exact city name and passes resolved id to persistence`() {
-        val answer = asUser { tools.updateCity("Oslo", "Oslo", 710000, "conversation-1") }
+        val answer = asUser { tools.updateCity("Oslo", "Oslo", 710000, -1, "conversation-1") }
 
         assertEquals("Queued update of Oslo to Oslo with a population of 710000.", answer)
         assertEquals(
@@ -83,7 +83,7 @@ class CityAgentToolsTest {
 
     @Test
     fun `delete rejects a partial name match without changing a city`() {
-        val answer = asUser { tools.deleteCity("Os", "conversation-1") }
+        val answer = asUser { tools.deleteCity("Os", -1, "conversation-1") }
 
         assertEquals("I couldn't find a city named Os.", answer)
         assertTrue(commands.isEmpty())
@@ -116,8 +116,8 @@ class CityAgentToolsTest {
             tools.createCity("Stockholm", 100000, "conversation-1")
             tools.recordMessage("conversation-1", "assistant", "Queued Stockholm.")
             tools.recordMessage("conversation-1", "user", "Remove Oslo")
-            tools.updateCity("Oslo", "Oslo", 710000, "conversation-1")
-            tools.deleteCity("Oslo", "conversation-1")
+            tools.updateCity("Oslo", "Oslo", 710000, -1, "conversation-1")
+            tools.deleteCity("Oslo", -1, "conversation-1")
 
             val history = tools.operationHistory("conversation-1")
             assertTrue(history.contains("User: Create Stockholm"))
@@ -178,7 +178,7 @@ class CityAgentToolsTest {
 
     @Test
     fun `city mutation tools reject calls without authenticated execution context`() {
-        val answer = tools.deleteCity("Oslo", "conversation-1")
+        val answer = tools.deleteCity("Oslo", -1, "conversation-1")
 
         assertTrue(answer.startsWith("AUTHENTICATION_REQUIRED:"))
         assertTrue(commands.isEmpty())
@@ -188,7 +188,7 @@ class CityAgentToolsTest {
     fun `city mutation tools reject users without permission before enqueueing`() {
         val reader = user.copy(roles = listOf("READER"))
         val answer = asUser("conversation-1", reader) {
-            tools.deleteCity("Oslo", "conversation-1")
+            tools.deleteCity("Oslo", -1, "conversation-1")
         }
 
         assertTrue(answer.startsWith("PERMISSION_DENIED:"))
