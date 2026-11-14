@@ -54,6 +54,7 @@ data class AuthenticatedUser(
     val id: String,
     val username: String,
     val displayName: String,
+    val sessionId: String? = null,
     val roles: List<String> = listOf("USER"),
     val permissions: List<String> = AuthorizationService.permissionsFor(roles).map(Permission::name),
 )
@@ -157,7 +158,7 @@ internal class AuthenticationService(
             sessions.remove(session.id, record)
             return null
         }
-        return record.user
+        return record.user.copy(sessionId = session.id)
     }
 
     fun logout(session: AuthSession?) {

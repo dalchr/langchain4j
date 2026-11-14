@@ -13,15 +13,13 @@ data class CityCommand(
     val id: Int? = null,
     val name: String = "",
     val population: Int = 0,
-    val conversationId: String? = null,
-    val actorId: String? = null,
+    val ctx: ActorContext = ActorContext(),
 )
 
 internal data class CityOperationRecord(
     val description: String,
     val timestamp: Instant,
-    val conversationId: String?,
-    val actorId: String? = null,
+    val ctx: ActorContext = ActorContext(),
 )
 
 internal object CityOperationHistory {
@@ -79,14 +77,14 @@ object CityChangeProcessor {
                 }
                 connection.commit()
 
-                if (command.conversationId == null) {
+                if (command.ctx.conversationId == null) {
                     val description = when (command.operation) {
                         "create" -> "Created ${command.name} with population ${command.population}"
                         "update" -> "Updated ${previous?.name ?: command.id} to ${command.name}: population ${previous?.population ?: "unknown"} → ${command.population}"
                         "delete" -> "Deleted ${previous?.name ?: "city ${command.id}"} with population ${previous?.population ?: "unknown"}"
                         else -> error("Unknown city operation: ${command.operation}")
                     }
-                    CityOperationHistory.record(CityOperationRecord(description, Instant.now(), null, command.actorId))
+                    CityOperationHistory.record(CityOperationRecord(description, Instant.now(), command.ctx))
                 }
 
                 val cities = connection.createStatement().use { statement ->

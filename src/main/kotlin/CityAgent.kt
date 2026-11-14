@@ -52,7 +52,7 @@ internal data class AgentHistoryEntry(
     val role: String,
     val content: String,
     val timestamp: Instant = Instant.now(),
-    val actorId: String? = null,
+    val ctx: ActorContext = ActorContext(),
 )
 
 internal fun agentConversationKey(user: AuthenticatedUser, conversationId: String): String =
@@ -103,6 +103,12 @@ private interface CityAssistant {
         For update and delete requests, identify the city by its exact name using the tools; never ask for or invent a database ID.
         For a create request without a population, call createCity with the population omitted so the tool can ask a follow-up question.
         Never invent a population. If a city name is missing or a name does not resolve uniquely, ask the user to clarify.
+        
+        When the user asks "was this me?" or "who did X?", use the operation history and check:
+        1. **[same session]** means the action was performed in the same browser session as the current chat — this was almost certainly the user.
+        2. **[different session]** means the action came from a different browser session (e.g. another tab, device, or another user with the same account).
+        3. If no session tag is present, the action came from an older system that did not track sessions.
+        Combine session tags with the operation source ("from chat" for assistant actions, "from dashboard" for UI actions) and the actor name to give the user a confident answer about whether they performed an action.
         """
     )
     fun chat(@MemoryId conversationId: String, @UserMessageAnnotation message: String): TokenStream
@@ -154,16 +160,21 @@ internal class CityAgentTools(
         }
         return runCatching {
             val actor = executionContexts.getValue(conversationId)
+            val ctx = ActorContext(
+                conversationId = conversationId,
+                actorId = actor.id,
+                sessionId = actor.sessionId,
+                source = "chat",
+            )
             enqueueChange(
                 CityCommand(
                     operation = "create",
                     name = name.trim(),
                     population = population,
-                    conversationId = conversationId,
-                    actorId = actor.id,
+                    ctx = ctx,
                 ),
             )
-            recordOperation(conversationId, "Created ${name.trim()} with population $population", actor.id)
+            recordOperation(conversationId, "Created ${name.trim()} with population $population", ctx)
             conversations.get(conversationId).pendingCreateName = null
             "Queued creation of ${name.trim()} with a population of $population."
         }.getOrElse { "I couldn't create ${name.trim()}: ${it.message ?: "the city update failed"}." }
@@ -182,20 +193,25 @@ internal class CityAgentTools(
         val city = lookup.city ?: return lookup.failure!!
         return runCatching {
             val actor = executionContexts.getValue(conversationId)
+            val ctx = ActorContext(
+                conversationId = conversationId,
+                actorId = actor.id,
+                sessionId = actor.sessionId,
+                source = "chat",
+            )
             enqueueChange(
                 CityCommand(
                     operation = "update",
                     id = city.id,
                     name = name.trim(),
                     population = population,
-                    conversationId = conversationId,
-                    actorId = actor.id,
+                    ctx = ctx,
                 ),
             )
             recordOperation(
                 conversationId,
                 "Updated ${city.name} to ${name.trim()}: population ${city.population} → $population",
-                actor.id,
+                ctx,
             )
             "Queued update of ${city.name} to ${name.trim()} with a population of $population."
         }.getOrElse { "I couldn't update ${city.name}: ${it.message ?: "the city update failed"}." }
@@ -211,8 +227,20 @@ internal class CityAgentTools(
         val city = lookup.city ?: return lookup.failure!!
         return runCatching {
             val actor = executionContexts.getValue(conversationId)
-            enqueueChange(CityCommand("delete", id = city.id, conversationId = conversationId, actorId = actor.id))
-            recordOperation(conversationId, "Deleted ${city.name} with population ${city.population}", actor.id)
+            val ctx = ActorContext(
+                conversationId = conversationId,
+                actorId = actor.id,
+                sessionId = actor.sessionId,
+                source = "chat",
+            )
+            enqueueChange(
+                CityCommand(
+                    "delete",
+                    id = city.id,
+                    ctx = ctx,
+                ),
+            )
+            recordOperation(conversationId, "Deleted ${city.name} with population ${city.population}", ctx)
             "Queued deletion of ${city.name}."
         }.getOrElse { "I couldn't delete ${city.name}: ${it.message ?: "the city update failed"}." }
     }
@@ -226,16 +254,21 @@ internal class CityAgentTools(
         }
         return runCatching {
             val actor = executionContexts.getValue(conversationId)
+            val ctx = ActorContext(
+                conversationId = conversationId,
+                actorId = actor.id,
+                sessionId = actor.sessionId,
+                source = "chat",
+            )
             enqueueChange(
                 CityCommand(
                     operation = "create",
                     name = name,
                     population = population,
-                    conversationId = conversationId,
-                    actorId = actor.id,
+                    ctx = ctx,
                 ),
             )
-            recordOperation(conversationId, "Created $name with population $population", actor.id)
+            recordOperation(conversationId, "Created $name with population $population", ctx)
             conversation.pendingCreateName = null
             "Queued creation of $name with a population of $population."
         }.getOrElse { "I couldn't create $name: ${it.message ?: "the city update failed"}." }
@@ -245,10 +278,11 @@ internal class CityAgentTools(
     fun operationHistory(@ToolMemoryId conversationId: String): String {
         authorizationFailure(conversationId, Permission.CHAT_ACCESS)?.let { return it }
         val history = conversations.get(conversationId).activityHistory
+        val currentUserSession = executionContexts[conversationId]?.sessionId
         val entries = (history.filter { it.role != "city_operation" } +
             CityOperationHistory.snapshot()
-                .filter { it.conversationId == null }
-                .map { AgentHistoryEntry("external_city_operation", it.description, it.timestamp, it.actorId) } +
+                .filter { it.ctx.conversationId == null }
+                .map { AgentHistoryEntry("external_city_operation", it.description, it.timestamp, it.ctx) } +
             history.filter { it.role == "city_operation" })
             .sortedBy { it.timestamp }
         if (entries.isEmpty()) return "No city changes have been queued in this conversation."
@@ -260,18 +294,26 @@ internal class CityAgentTools(
                 "external_city_operation" -> "City operation (committed outside the assistant)"
                 else -> "City operation (queued)"
             }
-            "${index + 1}. $label: ${operation.content}"
+            val actorPart = operation.ctx.actorName?.let { " by $it" } ?: ""
+            val sessionInfo = if (operation.ctx.sessionId == currentUserSession && operation.ctx.sessionId != null) {
+                " [same session]"
+            } else if (operation.ctx.sessionId != null) {
+                " [different session]"
+            } else {
+                " (from ${operation.ctx.source ?: "unknown"})"
+            }
+            "${index + 1}. $label: ${operation.content}$actorPart$sessionInfo"
         }.joinToString("\n")
     }
 
-    fun recordMessage(conversationId: String, role: String, content: String, actorId: String? = null) {
+    fun recordMessage(conversationId: String, role: String, content: String, ctx: ActorContext = ActorContext()) {
         val history = conversations.get(conversationId).activityHistory
         if (history.size == MAX_CONVERSATION_HISTORY) history.removeAt(0)
-        history.add(AgentHistoryEntry(role, content, actorId = actorId))
+        history.add(AgentHistoryEntry(role, content, ctx = ctx))
     }
 
-    private fun recordOperation(conversationId: String, description: String, actorId: String) {
-        recordMessage(conversationId, "city_operation", description, actorId)
+    private fun recordOperation(conversationId: String, description: String, ctx: ActorContext) {
+        recordMessage(conversationId, "city_operation", description, ctx)
     }
 
     private fun authorizationFailure(conversationId: String, permission: Permission): String? {
@@ -373,7 +415,7 @@ class CityAgent(
                     try {
                         val requestStartedAt = System.nanoTime()
                         log.info("Starting LLM chat request for conversation {}", request.conversationId)
-                        tools.recordMessage(conversationId, "user", request.message, user.id)
+                        tools.recordMessage(conversationId, "user", request.message, ActorContext(actorId = user.id, sessionId = user.sessionId, source = "chat"))
                         val pendingName = conversation.pendingCreateName
                         val population = populationFromReply(request.message)
                         val followUp = if (pendingName != null && population != null) {
@@ -390,7 +432,7 @@ class CityAgent(
                         if (followUp != null) {
                             conversation.memory.add(UserMessage.from(request.message))
                             conversation.memory.add(AiMessage.from(followUp))
-                            tools.recordMessage(conversationId, "assistant", followUp, user.id)
+                            tools.recordMessage(conversationId, "assistant", followUp, ActorContext(actorId = user.id, sessionId = user.sessionId, source = "chat"))
                             writeEvent(AgentStreamEvent("token", content = followUp))
                             writeEvent(AgentStreamEvent("done"))
                             log.info(
@@ -414,7 +456,7 @@ class CityAgent(
                                             log.warn("LLM chat completed without text for conversation {} ({} ms)", request.conversationId, (System.nanoTime() - requestStartedAt) / 1_000_000)
                                             events.trySend(AgentStreamEvent("error", error = "The assistant returned an empty response. Please try again."))
                                         } else {
-                                            tools.recordMessage(conversationId, "assistant", response, user.id)
+                                            tools.recordMessage(conversationId, "assistant", response, ActorContext(actorId = user.id, sessionId = user.sessionId, source = "chat"))
                                             log.info("LLM chat completed for conversation {} ({} ms, {} characters)", request.conversationId, (System.nanoTime() - requestStartedAt) / 1_000_000, response.length)
                                             events.trySend(AgentStreamEvent("done"))
                                         }

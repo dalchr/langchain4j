@@ -294,8 +294,11 @@ async function viewConsumedMessages() {
                 val city = call.receive<CityCommand>().copy(
                     operation = "create",
                     id = null,
-                    conversationId = null,
-                    actorId = user.id,
+                    ctx = ActorContext(
+                        actorId = user.id,
+                        sessionId = user.sessionId,
+                        source = "dashboard",
+                    ),
                 )
                 basicPublish { exchange = "test-exchange"; routingKey = "test-routing-key"; message { CityChangeProcessor.payload(city) } }
                 call.respondText("City change queued")
@@ -307,8 +310,11 @@ async function viewConsumedMessages() {
                 val city = call.receive<CityCommand>().copy(
                     operation = "update",
                     id = id,
-                    conversationId = null,
-                    actorId = user.id,
+                    ctx = ActorContext(
+                        actorId = user.id,
+                        sessionId = user.sessionId,
+                        source = "dashboard",
+                    ),
                 )
                 basicPublish { exchange = "test-exchange"; routingKey = "test-routing-key"; message { CityChangeProcessor.payload(city) } }
                 call.respondText("City change queued")
@@ -317,7 +323,15 @@ async function viewConsumedMessages() {
                 if (!call.requirePermission(Permission.CRUD_DELETE) || !call.requireCsrfToken()) return@delete
                 val id = call.parameters["id"]?.toIntOrNull() ?: throw IllegalArgumentException("invalid id")
                 val user = call.currentAuthenticatedUser() ?: return@delete
-                val command = CityCommand("delete", id, actorId = user.id)
+                val command = CityCommand(
+                    "delete",
+                    id = id,
+                    ctx = ActorContext(
+                        actorId = user.id,
+                        sessionId = user.sessionId,
+                        source = "dashboard",
+                    ),
+                )
                 basicPublish { exchange = "test-exchange"; routingKey = "test-routing-key"; message { CityChangeProcessor.payload(command) } }
                 call.respondText("City change queued")
             }

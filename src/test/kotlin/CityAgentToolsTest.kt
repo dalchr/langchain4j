@@ -42,11 +42,15 @@ class CityAgentToolsTest {
         assertEquals("Queued creation of Reykjavik with a population of 139875.", answer)
         assertEquals(
             CityCommand(
-                "create",
+                operation = "create",
                 name = "Reykjavik",
                 population = 139875,
-                conversationId = "conversation-1",
-                actorId = user.id,
+                ctx = ActorContext(
+                    conversationId = "conversation-1",
+                    actorId = user.id,
+                    sessionId = user.sessionId,
+                    source = "chat",
+                ),
             ),
             commands.single(),
         )
@@ -70,12 +74,16 @@ class CityAgentToolsTest {
         assertEquals("Queued update of Oslo to Oslo with a population of 710000.", answer)
         assertEquals(
             CityCommand(
-                "update",
+                operation = "update",
                 id = 1,
                 name = "Oslo",
                 population = 710000,
-                conversationId = "conversation-1",
-                actorId = user.id,
+                ctx = ActorContext(
+                    conversationId = "conversation-1",
+                    actorId = user.id,
+                    sessionId = user.sessionId,
+                    source = "chat",
+                ),
             ),
             commands.single(),
         )
@@ -129,7 +137,7 @@ class CityAgentToolsTest {
             assertTrue(
                 conversations.get("conversation-1").activityHistory
                     .filter { it.role == "city_operation" }
-                    .all { it.actorId == user.id },
+                    .all { it.ctx.actorId == user.id },
             )
         }
     }
@@ -137,7 +145,7 @@ class CityAgentToolsTest {
     @Test
     fun `operation history includes committed dashboard deletions`() {
         CityOperationHistory.record(
-            CityOperationRecord("Deleted Helsinki with population 694000", Instant.now(), null),
+            CityOperationRecord("Deleted Helsinki with population 694000", Instant.now(), ActorContext(actorId = "dashboard-user")),
         )
 
         val history = asUser("conversation-with-dashboard-delete") {
