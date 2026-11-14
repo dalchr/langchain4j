@@ -225,9 +225,11 @@ fun Application.configureAuthentication() {
     val isProduction = environment["APP_ENV"].equals("production", ignoreCase = true)
     val encryptionKey = sessionKey(environment, "SESSION_ENCRYPTION_KEY", isProduction)
     val signingKey = sessionKey(environment, "SESSION_SIGNING_KEY", isProduction)
+    val isBehindProxy = environment["X_FORWARDED_PROTO"]
+        ?.startsWith("https", ignoreCase = true) == true
     configureAuthentication(
         authenticationService = AuthenticationService.fromEnvironment(this, environment),
-        secureCookie = !isDevelopment,
+        secureCookie = isBehindProxy,
         encryptionKey = encryptionKey,
         signingKey = signingKey,
     )
