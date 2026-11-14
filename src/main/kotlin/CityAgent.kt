@@ -1,12 +1,14 @@
 package com.example
 
+import com.fasterxml.jackson.annotation.JsonCreator
+import com.fasterxml.jackson.databind.JsonNode
 import dev.langchain4j.agent.tool.P
 import dev.langchain4j.agent.tool.Tool
 import dev.langchain4j.agent.tool.ToolExecutionRequest
 import dev.langchain4j.agent.tool.ToolMemoryId
 import dev.langchain4j.data.message.AiMessage
-import dev.langchain4j.data.message.UserMessage
 import dev.langchain4j.data.message.ToolExecutionResultMessage
+import dev.langchain4j.data.message.UserMessage
 import dev.langchain4j.memory.ChatMemory
 import dev.langchain4j.memory.chat.MessageWindowChatMemory
 import dev.langchain4j.model.openai.OpenAiStreamingChatModel
@@ -62,7 +64,7 @@ internal fun recoverFromUnknownCityTool(request: ToolExecutionRequest): ToolExec
     ToolExecutionResultMessage.toolExecutionResultMessage(
         request,
         "The tool name '${request.name()}' is not registered. Use only these exact tool names: " +
-            "listCities, lookupCityByName, operationHistory, createCity, updateCity, deleteCity. " +
+            "listCities, lookupCityByName, operationHistory, createCity, updateCity, deleteCity, updateCities. " +
             "Retry the requested action using the appropriate exact tool name.",
     )
 
@@ -73,6 +75,23 @@ internal fun populationFromReply(message: String): Int? {
         .toList()
     if (values.size != 1) return null
     return values.single()?.takeIf { it >= 0 }
+}
+
+
+@Serializable
+internal data class CityPopulationUpdate(
+    val name: String,
+    val newPopulation: Int,
+) {
+    companion object {
+        @JvmStatic
+        @JsonCreator
+        fun fromJson(node: JsonNode): CityPopulationUpdate =
+            CityPopulationUpdate(
+                name = node.get("name").asText(),
+                newPopulation = node.get("newPopulation").asInt(),
+            )
+    }
 }
 
 internal class AgentConversationRegistry(
@@ -245,6 +264,63 @@ internal class CityAgentTools(
         }.getOrElse { "I couldn't delete ${city.name}: ${it.message ?: "the city update failed"}." }
     }
 
+    @Tool("Bulk update the populations of multiple cities in a single call. This reduces the number of LLM roundtrips needed for updating several cities at once. Each update specifies a city name and a new population.")
+    fun updateCities(
+        @P(value = "A list of cities to update, each with the city name and new population") updates: List<CityPopulationUpdate>,
+        @ToolMemoryId conversationId: String,
+    ): String {
+        authorizationFailure(conversationId, Permission.CRUD_UPDATE)?.let { return it }
+        val results = mutableListOf<String>()
+        var successCount = 0
+
+        for (update in updates) {
+            val name = update.name.trim()
+            val newPopulation = update.newPopulation
+
+            if (name.isBlank()) {
+                results.add("Skipped empty city name.")
+                continue
+            }
+
+            val lookup = lookupCity(name)
+            val resolution = when {
+                lookup.city != null -> CityResolved(lookup.city)
+                lookup.multipleMatches != null -> {
+                    val list = lookup.multipleMatches.joinToString("; ") { "${it.name} (population: ${it.population})" }
+                    CityNotFound("${name}: Multiple cities exist with that name. Specify one: $list")
+                }
+                lookup.failure != null -> CityNotFound("${name}: ${lookup.failure}")
+                else -> CityNotFound("${name}: Unknown error looking up city.")
+            }
+
+            when (resolution) {
+                is CityResolved -> runCatching {
+                    val actor = executionContexts.getValue(conversationId)
+                    enqueueChange(
+                        CityCommand(
+                            operation = "update",
+                            id = resolution.city.id,
+                            name = resolution.city.name,
+                            population = newPopulation,
+                            conversationId = conversationId,
+                            actorId = actor.id,
+                        ),
+                    )
+                    recordOperation(conversationId, "Updated ${resolution.city.name} to population ${resolution.city.population} → $newPopulation", actor.id)
+                    successCount++
+                    results.add("${resolution.city.name}: Updated population to $newPopulation.")
+                }.getOrElse {
+                    results.add("${resolution.city.name}: Update failed - ${it.message ?: "unknown error"}")
+                }
+                is CityNotFound -> results.add(resolution.message)
+            }
+        }
+
+        val cityStr = if (successCount == 1) "city" else "cities"
+        val summary = "Updated $successCount $cityStr. ${results.joinToString(" ")}"
+        return summary
+    }
+
     fun completePendingCreate(conversationId: String, population: Int): String? {
         authorizationFailure(conversationId, Permission.CRUD_CREATE)?.let { return it }
         val conversation = conversations.get(conversationId)
@@ -329,6 +405,11 @@ internal class CityAgentTools(
         val failure: String? = null,
         val multipleMatches: List<CityView>? = null,
     )
+
+    private sealed class CityLookupResult
+    private data class CityResolved(val city: CityView) : CityLookupResult()
+    private data class CityNotFound(val message: String) : CityLookupResult()
+
 
     private companion object {
         const val MAX_CONVERSATION_HISTORY = 100

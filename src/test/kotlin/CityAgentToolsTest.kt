@@ -202,6 +202,85 @@ class CityAgentToolsTest {
         assertTrue(agentConversationKey(user, "same-id") != agentConversationKey(otherUser, "same-id"))
     }
 
+
+    @Test
+    fun `updateCities bulk updates multiple cities successfully`() {
+        val answer = asUser {
+            tools.updateCities(
+                listOf(
+                    CityPopulationUpdate("Oslo", 720000),
+                    CityPopulationUpdate("Oslo East", 1500),
+                ),
+                "conversation-1",
+            )
+        }
+
+        assertTrue(answer.startsWith("Updated 2 cities."))
+        assertTrue(answer.contains("Oslo"))
+        assertTrue(answer.contains("Oslo East"))
+        assertEquals(2, commands.size)
+        assertEquals("update", commands[0].operation)
+        assertEquals(720000, commands[0].population)
+        assertEquals("update", commands[1].operation)
+        assertEquals(1500, commands[1].population)
+    }
+
+    @Test
+    fun `updateCities handles mixed success and failure gracefully`() {
+        val answer = asUser {
+            tools.updateCities(
+                listOf(
+                    CityPopulationUpdate("Oslo", 720000),
+                    CityPopulationUpdate("Nonexistent", 500),
+                ),
+                "conversation-1",
+            )
+        }
+
+        assertTrue(answer.startsWith("Updated 1 city."))
+        assertTrue(answer.contains("Oslo"))
+        assertTrue(answer.contains("Nonexistent"))
+        assertTrue(answer.contains("couldn't find") || answer.contains("not found"))
+        assertEquals(1, commands.size)
+        assertEquals("update", commands[0].operation)
+        assertEquals(720000, commands[0].population)
+    }
+
+    @Test
+    fun `updateCities handles empty name gracefully`() {
+        val answer = asUser {
+            tools.updateCities(
+                listOf(
+                    CityPopulationUpdate("Oslo", 720000),
+                    CityPopulationUpdate("", 500),
+                ),
+                "conversation-1",
+            )
+        }
+
+        assertTrue(answer.startsWith("Updated 1 city."))
+        assertTrue(answer.contains("Skipped empty city name"))
+    }
+
+    @Test
+    fun `updateCities with empty list returns zero count`() {
+        val answer = asUser {
+            tools.updateCities(emptyList(), "conversation-1")
+        }
+
+        assertEquals("Updated 0 cities. ", answer)
+    }
+
+    @Test
+    fun `updateCities rejects without authenticated execution context`() {
+        val answer = tools.updateCities(
+            listOf(CityPopulationUpdate("Oslo", 720000)),
+            "conversation-1",
+        )
+
+        assertTrue(answer.startsWith("AUTHENTICATION_REQUIRED:"))
+    }
+
     private fun <T> asUser(
         conversationId: String = "conversation-1",
         authenticatedUser: AuthenticatedUser = user,
