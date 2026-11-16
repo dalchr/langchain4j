@@ -18,9 +18,12 @@ class CityAgentToolsTest {
     private val conversations = AgentConversationRegistry()
     private val commands = mutableListOf<CityCommand>()
     private val user = AuthenticatedUser("local:test-user", "test-user", "Test User")
+    private val testConnection = java.sql.DriverManager.getConnection("jdbc:h2:mem:testdb;DB_CLOSE_DELAY=-1", "sa", "")
+    private val testService = CityService(testConnection)
     private val tools = CityAgentTools(
         log = org.slf4j.LoggerFactory.getLogger("CityAgentToolsTest"),
         conversations = conversations,
+        cityService = testService,
         searchCities = { query -> cities.filter { it.name.contains(query, ignoreCase = true) } },
         listCities = { cities },
         enqueueChange = commands::add,

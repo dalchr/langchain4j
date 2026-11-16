@@ -84,6 +84,10 @@ For city-related questions, the assistant uses its city-context tools rather tha
 
 `docker compose up -d` starts Elasticsearch on port `9200` alongside PostgreSQL and RabbitMQ. Ktor creates the `cities` index and reindexes database cities at startup; newly created cities are indexed immediately. `GET /demo/cities/search?name=lon` queries Elasticsearch, and the React search field sends a request after each keystroke with a 20 ms debounce.
 
+### Domain Operation Tool Design
+
+The agent tooling follows a "LLM = intent, Application = execution" pattern: complex multi-entity operations are delegated to deterministic service methods (e.g., `updateAllCities(delta)` applies a population change to every city atomically, without the model constructing individual update payloads). This approach eliminates the fragility of having the LLM manage entity state across conversation turns. See `docs/solutions/domain-operation-design.md` for the full design principles, tool taxonomy, anti-patterns, and testing checklist.
+
 ### Production assets
 
 Build the frontend and copy its output into Ktor resources before creating the application artifact:

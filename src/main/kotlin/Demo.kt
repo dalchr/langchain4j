@@ -90,12 +90,14 @@ fun Application.configureDemo() {
             }
         }
     }
+    val cityService = CityService(dbConnection)
     val cityAgent = CityAgent(
         application = app,
         baseUrl = environment.config.propertyOrNull("llm.base-url")?.getString()
             ?: "http://finndet-host02:8000/v1/chat/completions",
         modelName = environment.config.propertyOrNull("llm.model-name")?.getString() ?: "openai/gpt-oss-20b",
         apiKey = System.getenv("LLM_API_KEY") ?: "not-needed",
+        cityService = cityService,
         searchCities = elasticsearch::searchByName,
         listCities = readAuthoritativeCities,
         enqueueChange = { command ->

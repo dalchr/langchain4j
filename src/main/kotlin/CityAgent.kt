@@ -26,6 +26,8 @@ import io.ktor.server.response.*
 import io.ktor.server.routing.*
 import io.ktor.utils.io.*
 import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.serialization.Serializable
@@ -62,7 +64,8 @@ internal fun recoverFromUnknownCityTool(request: ToolExecutionRequest): ToolExec
     ToolExecutionResultMessage.toolExecutionResultMessage(
         request,
         "The tool name '${request.name()}' is not registered. Use only these exact tool names: " +
-            "listCities, lookupCityByName, operationHistory, createCity, updateCity, deleteCity, updateCities. " +
+            "listCities, lookupCityByName, operationHistory, createCity, updateCity, deleteCity, updateCities, " +
+            "updateAllCities, listOperations, undoLastOperation, createSnapshot. " +
             "Retry the requested action using the appropriate exact tool name.",
     )
 
@@ -120,6 +123,7 @@ private interface CityAssistant {
         For update and delete requests, identify the city by its exact name using the tools; never ask for or invent a database ID.
         For a create request without a population, call createCity with the population omitted so the tool can ask a follow-up question.
         Never invent a population. If a city name is missing or a name does not resolve uniquely, ask the user to clarify.
+        For bulk operations (e.g., "add 50 to each city"), use domain operation tools like updateAllCities instead of constructing individual update payloads. The application handles the actual mutation deterministically.
         """
     )
     fun chat(@MemoryId conversationId: String, @UserMessageAnnotation message: String): TokenStream
@@ -128,6 +132,7 @@ private interface CityAssistant {
 internal class CityAgentTools(
     private val log: org.slf4j.Logger,
     private val conversations: AgentConversationRegistry,
+    private val cityService: CityService,
     private val searchCities: (String) -> List<CityView>,
     private val listCities: () -> List<CityView>,
     private val enqueueChange: (CityCommand) -> Unit,
@@ -320,6 +325,61 @@ internal class CityAgentTools(
         return summary
     }
 
+    /**
+     * Apply a population delta to ALL cities atomically.
+     * This is the domain operation for "add 50 to each city" — the LLM expresses intent, the application executes.
+     */
+    @Tool("Apply a numeric population delta to all cities in one atomic operation. Use this instead of updating cities individually. For example, 'add 50 to each city' becomes updateAllCities(50). Returns the affected count and before/after values.")
+    fun updateAllCities(
+        @P(value = "The population change to apply to every city (positive to increase, negative to decrease)", defaultValue = "0") delta: Int,
+        @ToolMemoryId conversationId: String,
+    ): String {
+        checkAuthorization(conversationId, Permission.CRUD_UPDATE)
+        return runCatching {
+            val result = cityService.updateAllPopulation(delta)
+            val actor = executionContexts.getValue(conversationId)
+            val changesText = result.changes.joinToString("\n") { c -> "  ${c.name}: ${c.beforePopulation} → ${c.afterPopulation}" }
+            val msg = "Applied a delta of $delta to ${result.affectedCount} cities:\n$changesText"
+            recordOperation(conversationId, "updateAllCities delta=$delta, affected=${result.affectedCount}", actor.id)
+            msg
+        }.getOrElse { "Failed to update all cities: ${it.message ?: "unknown error"}" }
+    }
+
+    /**
+     * Reverse the last committed UPDATE_ALL operation.
+     */
+    @Tool("Reverse the last committed UPDATE_ALL population change by applying the inverse delta. Use this to undo bulk population updates.")
+    fun undoLastOperation(@ToolMemoryId conversationId: String): String {
+        checkAuthorization(conversationId, Permission.CRUD_UPDATE)
+        return runCatching {
+            val result = cityService.undoLastOperation()
+            val actor = executionContexts.getValue(conversationId)
+            val changesText = result.changes.joinToString("\n") { c -> "  ${c.name}: ${c.beforePopulation} → ${c.afterPopulation}" }
+            val msg = "Undid the last operation. Applied inverse delta to ${result.affectedCount} cities:\n$changesText"
+            recordOperation(conversationId, "undoLastOperation, affected=${result.affectedCount}", actor.id)
+            msg
+        }.getOrElse { "Failed to undo last operation: no committed operation to undo" }
+    }
+
+    /**
+     * Record a named snapshot of all current city states for restore purposes.
+     */
+    @Tool("Record a named snapshot of the current city states. This captures all cities and their populations at this moment for later restoration.")
+    fun createSnapshot(
+        @P(value = "A descriptive name for this snapshot", defaultValue = "snapshot") name: String,
+        @ToolMemoryId conversationId: String,
+    ): String {
+        checkAuthorization(conversationId, Permission.CRUD_UPDATE)
+        return runCatching {
+            val snapshotId = cityService.createSnapshot(name)
+            val actor = executionContexts.getValue(conversationId)
+            val count = runCatching { listCities.invoke().size }.getOrElse { 0 }
+            val msg = "Created snapshot '$name' (id=$snapshotId) with $count cities."
+            recordOperation(conversationId, "createSnapshot name=$name, id=$snapshotId, cities=$count", actor.id)
+            msg
+        }.getOrElse { "Failed to create snapshot: ${it.message ?: "unknown error"}" }
+    }
+
     fun completePendingCreate(conversationId: String, population: Int): String? {
         checkAuthorization(conversationId, Permission.CRUD_CREATE)
         val conversation = conversations.get(conversationId)
@@ -344,13 +404,25 @@ internal class CityAgentTools(
         }.getOrElse { "I couldn't create $name: ${it.message ?: "the city update failed"}." }
     }
 
+    @Tool("Review all operations recorded in the system, including bulk updates, undo operations, and snapshots. Each entry shows the operation type, affected count, status, and timestamp.")
+    fun listOperations(@ToolMemoryId conversationId: String): String {
+        checkAuthorization(conversationId, Permission.CRUD_READ)
+        return runCatching {
+            val ops = cityService.listOperations()
+            if (ops.isEmpty()) return "No operations have been recorded yet."
+            ops.joinToString("\n") { op ->
+                val deltaPart = if (op.delta != null) " delta=${op.delta}" else ""
+                "  #${op.id} ${op.operationType}$deltaPart — affected:${op.affectedCount} at:${op.createdAt} status:${op.status}"
+            }
+        }.getOrElse { "Operation history is unavailable." }
+    }
+
     @Tool("Review this conversation's messages and city operations, including committed changes made through the dashboard. Use this for questions about what was previously created, updated, or deleted.")
     fun operationHistory(@ToolMemoryId conversationId: String): String {
         checkAuthorization(conversationId, Permission.CHAT_ACCESS)
         val history = conversations.get(conversationId).activityHistory
         val entries = (history.filter { it.role != "city_operation" } +
             CityOperationHistory.snapshot()
-                .filter { it.conversationId == null }
                 .map { AgentHistoryEntry("external_city_operation", it.description, it.timestamp, it.actorId) } +
             history.filter { it.role == "city_operation" })
             .sortedBy { it.timestamp }
@@ -436,12 +508,13 @@ class CityAgent(
     baseUrl: String,
     modelName: String,
     apiKey: String,
+    cityService: CityService,
     searchCities: (String) -> List<CityView>,
     listCities: () -> List<CityView>,
     enqueueChange: (CityCommand) -> Unit,
 ) {
     private val conversations = AgentConversationRegistry()
-    private val tools = CityAgentTools(application.log, conversations, searchCities, listCities, enqueueChange)
+    private val tools = CityAgentTools(application.log, conversations, cityService, searchCities, listCities, enqueueChange)
     private val assistant = AiServices.builder(CityAssistant::class.java)
         .streamingChatModel(
             OpenAiStreamingChatModel.builder()
@@ -617,3 +690,4 @@ data class AgentResetRequest(val conversationId: String)
 private fun openAiBaseUrl(endpoint: String): String = endpoint.trimEnd('/')
     .removeSuffix("/chat/completions")
     .trimEnd('/')
+
