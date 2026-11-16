@@ -171,6 +171,7 @@ internal class CityAgentTools(
     private val cityService: CityService,
     private val searchCities: (String) -> List<CityView>,
     private val listCities: () -> List<CityView>,
+    private val findCityByName: (String) -> CityView?,
     private val enqueueChange: (CityCommand) -> Unit,
 ) {
     private val executionContexts = ConcurrentHashMap<String, AuthenticatedUser>()
@@ -538,9 +539,13 @@ internal class CityAgentTools(
 
     private fun lookupCity(name: String): CityLookup {
         val normalizedName = name.normalizeCityName()
+        // Prefer authoritative SQL lookup (handles Unicode spaces correctly)
+        val bySql = runCatching { findCityByName(normalizedName) }.getOrNull()
+        if (bySql != null) return CityLookup(city = bySql)
+        // Fall back to Elasticsearch wildcard search
         val exactMatches = runCatching {
             searchCities(normalizedName).filter { it.name.normalizeCityName() == normalizedName }
-        }.getOrElse { return CityLookup(failure = "City search is unavailable, so I couldn't safely change $name.") }
+        }.getOrElse { emptyList<CityView>() }
         return when (exactMatches.size) {
             1 -> CityLookup(city = exactMatches.single())
             0 -> CityLookup(failure = "I couldn't find a city named $name.")
@@ -575,10 +580,11 @@ class CityAgent(
     cityService: CityService,
     searchCities: (String) -> List<CityView>,
     listCities: () -> List<CityView>,
+    findCityByName: (String) -> CityView?,
     enqueueChange: (CityCommand) -> Unit,
 ) {
     private val conversations = AgentConversationRegistry()
-    private val tools = CityAgentTools(application.log, conversations, cityService, searchCities, listCities, enqueueChange)
+    private val tools = CityAgentTools(application.log, conversations, cityService, searchCities, listCities, findCityByName, enqueueChange)
     private val assistant = AiServices.builder(CityAssistant::class.java)
         .streamingChatModel(
             OpenAiStreamingChatModel.builder()

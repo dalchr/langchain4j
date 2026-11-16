@@ -68,6 +68,7 @@ class CityService(private val connection: Connection) {
             "  DESCRIPTION TEXT" +
             ");"
         private const val SELECT_CITY_BY_ID = "SELECT name, population FROM cities WHERE id = ?"
+        private const val SELECT_CITY_BY_NAME = "SELECT id, name, population FROM cities WHERE LOWER(name) = LOWER(?)"
         private const val INSERT_CITY = "INSERT INTO cities (name, population) VALUES (?, ?)"
         private const val UPDATE_CITY = "UPDATE cities SET name = ?, population = ? WHERE id = ?"
         private const val DELETE_CITY = "DELETE FROM cities WHERE id = ?"
@@ -113,6 +114,18 @@ class CityService(private val connection: Connection) {
             return@withContext City(name, population)
         } else {
             throw Exception("Record not found")
+        }
+    }
+
+    // Read a city by name (case-insensitive)
+    suspend fun findByName(name: String): CityView? = withContext(Dispatchers.IO) {
+        val statement = connection.prepareStatement(SELECT_CITY_BY_NAME)
+        statement.setString(1, name)
+        val resultSet = statement.executeQuery()
+        if (resultSet.next()) {
+            CityView(resultSet.getInt(1), resultSet.getString(2), resultSet.getInt(3))
+        } else {
+            null
         }
     }
 

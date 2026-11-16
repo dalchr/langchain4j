@@ -26,6 +26,7 @@ class CityAgentToolsTest {
         cityService = testService,
         searchCities = { query -> cities.filter { it.name.contains(query, ignoreCase = true) } },
         listCities = { cities },
+        findCityByName = { name -> cities.firstOrNull { it.name.equals(name, ignoreCase = true) } },
         enqueueChange = commands::add,
     )
 

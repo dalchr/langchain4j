@@ -100,10 +100,10 @@ fun Application.configureDemo() {
         cityService = cityService,
         searchCities = elasticsearch::searchByName,
         listCities = readAuthoritativeCities,
+        findCityByName = { name -> runBlocking(Dispatchers.IO) { cityService.findByName(name) } },
         enqueueChange = { command ->
             runBlocking(Dispatchers.IO) { CityCommandPublisher.publish(command) }
         },
-        // authoritativeCities = readAuthoritativeCities,
     )
     runCatching {
         val cities = dbConnection.createStatement().executeQuery("SELECT id, name, population FROM cities").let { rs ->
