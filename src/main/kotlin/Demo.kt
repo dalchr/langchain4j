@@ -40,6 +40,17 @@ fun Application.configureDemo() {
         environment.config.propertyOrNull("elasticsearch.url")?.getString() ?: "http://localhost:9200"
     )
     CityChangeProcessor.search = elasticsearch
+    val readAuthoritativeCities = {
+        DriverManager.getConnection(databaseUrl, databaseUser, databasePassword).use { connection ->
+            connection.createStatement().use { statement ->
+                statement.executeQuery("SELECT id, name, population FROM cities ORDER BY id").use { result ->
+                    buildList {
+                        while (result.next()) add(CityView(result.getInt(1), result.getString(2), result.getInt(3)))
+                    }
+                }
+            }
+        }
+    }
     val cityAgent = CityAgent(
         application = app,
         baseUrl = environment.config.propertyOrNull("llm.base-url")?.getString()
@@ -47,10 +58,11 @@ fun Application.configureDemo() {
         modelName = environment.config.propertyOrNull("llm.model-name")?.getString() ?: "openai/gpt-oss-20b",
         apiKey = System.getenv("LLM_API_KEY") ?: "not-needed",
         searchCities = elasticsearch::searchByName,
-        listCities = elasticsearch::listCities,
+        listCities = readAuthoritativeCities,
         enqueueChange = { command ->
             runBlocking(Dispatchers.IO) { CityCommandPublisher.publish(command) }
         },
+        // authoritativeCities = readAuthoritativeCities,
     )
     runCatching {
         val cities = dbConnection.createStatement().executeQuery("SELECT id, name, population FROM cities").let { rs ->

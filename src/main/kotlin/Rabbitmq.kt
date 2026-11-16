@@ -65,6 +65,7 @@ fun Application.configureRabbitmq() {
             }
             queueDeclare {
                 queue = consumerQueue
+                durable = true
                 arguments = mapOf(
                     "x-dead-letter-exchange" to "dlx",
                     "x-dead-letter-routing-key" to "dlq-dlx"

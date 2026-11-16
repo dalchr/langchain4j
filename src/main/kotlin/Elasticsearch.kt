@@ -37,7 +37,7 @@ class ElasticsearchClient(private val baseUrl: String) {
         val response = request("POST", "/$index/_search", buildJsonObject {
             put("size", 100)
             putJsonObject("query") {
-                putJsonObject("wildcard") { put("name", "*$name*") }
+                putJsonObject("wildcard") { put("name", "*${name.lowercase()}*") }
             }
         }.toString())
         val hits = Json.parseToJsonElement(response).jsonObject["hits"]?.jsonObject

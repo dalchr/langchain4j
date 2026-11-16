@@ -16,18 +16,14 @@ import dev.langchain4j.service.AiServices
 import dev.langchain4j.service.MemoryId
 import dev.langchain4j.service.SystemMessage
 import dev.langchain4j.service.TokenStream
-import dev.langchain4j.service.UserMessage as UserMessageAnnotation
-import io.ktor.http.ContentType
-import io.ktor.http.HttpStatusCode
-import io.ktor.server.application.Application
-import io.ktor.server.application.log
-import io.ktor.server.request.receive
-import io.ktor.server.response.respond
-import io.ktor.server.response.respondBytesWriter
-import io.ktor.server.routing.Route
-import io.ktor.server.routing.post
-import io.ktor.utils.io.ByteWriteChannel
-import io.ktor.utils.io.writeStringUtf8
+import dev.langchain4j.service.tool.ToolArgumentsErrorHandler
+import dev.langchain4j.service.tool.ToolExecutionErrorHandler
+import io.ktor.http.*
+import io.ktor.server.application.*
+import io.ktor.server.request.*
+import io.ktor.server.response.*
+import io.ktor.server.routing.*
+import io.ktor.utils.io.*
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -36,6 +32,7 @@ import kotlinx.serialization.json.Json
 import java.time.Duration
 import java.time.Instant
 import java.util.concurrent.ConcurrentHashMap
+import dev.langchain4j.service.UserMessage as UserMessageAnnotation
 
 @Serializable
 data class AgentChatRequest(val conversationId: String, val message: String)
@@ -384,14 +381,15 @@ internal class CityAgentTools(
         return if (AuthorizationService.hasPermission(user, permission)) {
             null
         } else {
+            println("PERMISSION_DENIED: You are not allowed to perform this operation.")
             "PERMISSION_DENIED: You are not allowed to perform this operation."
         }
     }
 
     private fun lookupCity(name: String): CityLookup {
-        val normalizedName = name.trim()
+        val normalizedName = name.normalizeCityName()
         val exactMatches = runCatching {
-            searchCities(normalizedName).filter { it.name.equals(normalizedName, ignoreCase = true) }
+            searchCities(normalizedName).filter { it.name.normalizeCityName() == normalizedName }
         }.getOrElse { return CityLookup(failure = "City search is unavailable, so I couldn't safely change $name.") }
         return when (exactMatches.size) {
             1 -> CityLookup(city = exactMatches.single())
@@ -399,6 +397,9 @@ internal class CityAgentTools(
             else -> CityLookup(multipleMatches = exactMatches)
         }
     }
+
+    private fun String.normalizeCityName(): String =
+        replace(Regex("\\p{Space}"), " ").trim()
 
     private data class CityLookup(
         val city: CityView? = null,
@@ -438,6 +439,8 @@ class CityAgent(
         )
         .chatMemoryProvider { memoryId -> conversations.get(memoryId.toString()).memory }
         .tools(tools)
+        .toolArgumentsErrorHandler(ToolArgumentsErrorHandler.sendExceptionMessageToLlm())
+        .toolExecutionErrorHandler(ToolExecutionErrorHandler.failInvocationUnlessVisibleToLlm())
         .hallucinatedToolNameStrategy(::recoverFromUnknownCityTool)
         .build()
     private val log = application.log
