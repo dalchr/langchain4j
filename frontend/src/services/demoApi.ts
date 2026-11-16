@@ -102,9 +102,10 @@ export async function deleteCity(id: number): Promise<string> {
 }
 
 export interface AgentStreamEvent {
-  type: 'token' | 'done' | 'error'
+  type: 'token' | 'done' | 'error' | 'working'
   content?: string
   error?: string
+  status?: string
 }
 
 export async function resetAgentConversation(conversationId: string): Promise<void> {

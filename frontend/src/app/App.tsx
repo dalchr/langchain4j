@@ -52,6 +52,8 @@ export function App() {
   const [restartingConversation, setRestartingConversation] = useState(false)
   const chatTextareaRef = useRef<HTMLTextAreaElement>(null)
   const [agentStatus, setAgentStatus] = useState('')
+  const [workingMessage, setWorkingMessage] = useState<string | null>(null)
+  const [isWorkingFading, setIsWorkingFading] = useState(false)
 
   useEffect(() => {
     setTimeout(() => chatTextareaRef.current?.focus(), 0)
@@ -183,6 +185,14 @@ export function App() {
     if (container) container.scrollTop = container.scrollHeight
   }, [conversation])
 
+  const clearWorkingMessage = () => {
+    setIsWorkingFading(true)
+    setTimeout(() => {
+      setWorkingMessage(null)
+      setIsWorkingFading(false)
+    }, 400)
+  }
+
   const sendAgentRequest = async (message: string, onComplete?: () => void): Promise<boolean> => {
     const responseId = generateUuid()
     const userMessageId = generateUuid()
@@ -197,14 +207,19 @@ export function App() {
     try {
       await streamAgentMessage(conversationId, message, (event) => {
         if (event.type === 'token' && event.content) {
+          clearWorkingMessage()
           setConversation((current) => current.map((entry) => entry.id === responseId
             ? { ...entry, content: entry.content + event.content }
             : entry))
+        } else if (event.type === 'working') {
+          setWorkingMessage(event.content ?? 'The assistant is working on your request…')
         } else if (event.type === 'error') {
+          clearWorkingMessage()
           setConversation((current) => current.map((entry) => entry.id === responseId
             ? { ...entry, content: event.error ?? 'The assistant is temporarily unavailable.' }
             : entry))
         } else if (event.type === 'done') {
+          clearWorkingMessage()
           setConversation((current) => current.map((entry) => entry.id === responseId && !entry.content
             ? { ...entry, content: 'The assistant returned an empty response. Please try again.' }
             : entry))
@@ -350,6 +365,12 @@ export function App() {
                 <p>{entry.content || (sendingAgentMessage && entry.role === 'assistant' ? 'Thinking…' : '')}</p>
               </article>
             ))}
+            {workingMessage && (
+              <article className="chat-message working" aria-live="polite">
+                <strong>Assistant</strong>
+                <p>{workingMessage}</p>
+              </article>
+            )}
           </div>
           <form className="chat-form" onSubmit={(event) => void sendAgentMessage(event)}>
             <textarea

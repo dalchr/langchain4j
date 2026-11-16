@@ -26,7 +26,10 @@ import io.ktor.server.response.*
 import io.ktor.server.routing.*
 import io.ktor.utils.io.*
 import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.GlobalScope
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -676,10 +679,34 @@ class CityAgent(
                         } else {
                             val events = Channel<AgentStreamEvent>(Channel.UNLIMITED)
                             val responseText = StringBuilder()
+                            var firstTokenSent = false
+                            var keepAliveCount = 0
+                            val keepAliveJob = GlobalScope.launch(Dispatchers.IO) {
+                                try {
+                                    while (true && !firstTokenSent) {
+                                        delay(5000)
+                                        if (!firstTokenSent) {
+                                            keepAliveCount++
+                                            val waitSeconds = keepAliveCount * 5
+                                            writeStringUtf8(": keep-alive\n\n")
+                                            flush()
+                                            events.trySend(
+                                                AgentStreamEvent(
+                                                    "working",
+                                                    content = "The assistant isn't sleeping, just working hard to fulfill the requested operation. Please wait! ($waitSeconds seconds elapsed)",
+                                                ),
+                                            )
+                                        }
+                                    }
+                                } catch (_: CancellationException) {
+                                } catch (_: Exception) {
+                                }
+                            }
                             try {
                                 assistant.chat(conversationId, request.message)
                                     .onPartialResponse { partial ->
                                         responseText.append(partial)
+                                        firstTokenSent = true
                                         events.trySend(AgentStreamEvent("token", content = partial))
                                     }
                                     .onCompleteResponse {
@@ -713,6 +740,7 @@ class CityAgent(
                                     log.error("LLM chat stream failed for conversation {} after {} ms", request.conversationId, elapsedMs, error)
                                 }
                             } finally {
+                                keepAliveJob.cancel()
                                 events.cancel()
                             }
                         }

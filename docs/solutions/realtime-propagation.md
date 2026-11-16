@@ -2,148 +2,132 @@
 
 ## Purpose
 
-This document describes how domain state changes flow from the application layer to connected frontend clients via RabbitMQ, WebSocket, and HTTP polling — and where the propagation chain is currently incomplete.
+This document describes how domain state changes flow from the application layer to connected frontend clients, the mechanisms that enable it, and the bugs that were discovered and fixed during implementation. It serves as a technical reference for troubleshooting city-state sync, SSE streaming, and auth propagation issues.
+
+---
 
 ## Overview
 
 The city assistant application supports multiple clients that must see consistent, up-to-date city data in real time. Three independent mutation paths exist:
 
 1. **Dashboard CRUD** — Direct HTTP mutation via the React frontend (POST/PUT/DELETE `/demo/cities`)
-2. **Agent CRUD** — LangChain4j tool calls that enqueue changes to RabbitMQ (createCity, updateCity, deleteCity, updateCities)
-3. **Domain Operations** — High-level atomic operations executed directly by CityService (updateAllCities, undoLastOperation, createSnapshot)
+2. **Agent CRUD** — LangChain4j tool calls that enqueue changes to RabbitMQ (`createCity`, `updateCity`, `deleteCity`, `updateCities`)
+3. **Domain Operations** — High-level atomic operations executed directly by `CityService` (`updateAllCities`, `undoLastOperation`, `createSnapshot`)
 
-All three mutation paths modify the same PostgreSQL `cities` table and the Elasticsearch index. The question is: **how does every connected client learn about these changes?**
-
----
-
-## Current Propagation Chain (Working)
-
-### Dashboard CRUD → RabbitMQ → WebSocket → Frontend
-
-```
-React UI ──POST/PUT/DELETE──► Ktor Route
-                            │
-                            ├─ requirePermission("auth-session")
-                            │
-                            ├─ enqueueChange(CityCommand)
-                            │        │
-                            │        ▼
-                            │   CityCommandPublisher
-                            │        │
-                            │        ▼
-                            │   RabbitMQ (test-exchange → test-queue)
-                            │        │
-                            │        ▼
-                            │   RabbitMQ Consumer
-                            │        │
-                            │        ▼
-                            │   CityChangeProcessor.apply()
-                            │        │
-                            │        ├─ Persist to PostgreSQL
-                            │        ├─ Reindex Elasticsearch
-                            │        └─ ConsumerState.onMessage("city-changed")
-                            │                 │
-                            │                 ▼
-                            │         ConsumerState.messageChannel
-                            │                 │
-                            │                 ▼
-                            │         WebSocket broadcast loop
-                            │                 │
-                            │                 ▼
-                            │         WebSocketClient (all connected)
-                            │                 │
-                            │                 ▼
-                            │         useMessages() hook
-                            │                 │
-                            │                 ▼
-                            │         loadCities() — refetch
-                            │                 │
-                            ▼                 ▼
-                        UI refreshes        UI shows city-changed message
-```
-
-**What works:**
-- Every dashboard mutation publishes a `CITY_CHANGE` message via RabbitMQ
-- The consumer persists it, calls `ConsumerState.onMessage("city-changed")`, which broadcasts through WebSocket to all clients
-- The frontend `useMessages` hook detects `"city-changed"` and calls `loadCities()`, refetching the full city list
-
-### Agent CRUD → RabbitMQ → Same chain as above
-
-Agent tools (`createCity`, `updateCity`, `deleteCity`, `updateCities`) follow the identical path:
-
-```
-LLM tool call → enqueueChange(CityCommand) → RabbitMQ → same chain as above ✓
-```
+All three mutation paths modify the same PostgreSQL `cities` table. The question is: **how does every connected client learn about these changes?**
 
 ---
 
-## Current Propagation Gap (Broken)
+## Complete Propagation Chain (Working)
 
-### Domain Operations → No Propagation
+Every mutation — regardless of origin — now flows through the same broadcast entry point:
 
 ```
-LLM domain tool call → CityService.updateAllPopulation(delta)
-                       CityService.undoLastOperation()
-                       CityService.createSnapshot(name)
-                             │
-                             ├─ Persist to PostgreSQL
-                             ├─ Elasticsearch reindex (partial — only after individual CRUD)
-                             └─ [MISSING] ConsumerState.onMessage("city-changed")
-                                      │
-                                      ▼
-                              No WebSocket notification
-                                      │
-                                      ▼
-                              Clients see stale data
+┌──────────────────────────────────────────────────────┐
+│ Mutation Origin                                       │
+├──────────┬──────────┬────────────────────────────────┤
+│ Dashboard│ Agent CRUD│ Domain Operation              │
+│ CRUD     │           │                                │
+└────┬─────┴─────┬─────┴──────────┬─────────────────────┘
+     │           │                 │
+     ▼           ▼                 ▼
+  enqueueChange   │          cityService.*()
+  (via HTTP)      │                 │
+     │           │                 │
+     ▼           ▼                 ▼
+  RabbitMQ     │          CityAgentTools.* tool
+  publish       │          (updateAllCities,
+     │           │           undoLastOperation,
+     ▼           ▼           createSnapshot)
+  Consumer      │              │
+  processes     │              │
+     │           │              ▼
+     ▼           ▼       DB mutation (atomic)
+  CityChangeProcessor.apply()
+     │
+     ▼
+  DB persist + Elasticsearch reindex
+     │
+     ▼
+  ConsumerState.onMessage(body: String)
+     │
+     ▼
+  ConsumerState.messageChannel (Ktor Channel<WsMessage>)
+     │
+     ▼
+  WebSocket broadcast loop (Websocket.kt)
+     │
+     ▼
+  All connected WebSocketClient sessions
+     │
+     ▼
+  frontend/src/hooks/useMessages.ts
+     │
+     ▼
+  onCityChanged callback → loadCities() refetch
+     │
+     ▼
+  UI grid refreshes with fresh data
 ```
 
-**Why it's broken:** Domain operation tools (`updateAllCities`, `undoLastOperation`, `createSnapshot`) execute atomically within the application. They call `cityService.updateAllPopulation()` or `cityService.undoLastOperation()` directly — bypassing RabbitMQ entirely. Unlike CRUD tools, which enqueue a `CityCommand` that travels through the message broker, domain operations modify the database in-memory without broadcasting.
+**What works today:**
 
-**Result:** When the LLM applies "add 50 to each city", the database is updated correctly, but all other connected clients see stale data until they manually refresh or poll.
+- Every mutation path calls `ConsumerState.onMessage()` with a structured JSON payload.
+- The `ConsumerState.messageChannel` is a unbounded Ktor `Channel<WsMessage>` — no message loss under normal load.
+- The WebSocket broadcast loop iterates `ConsumerState.messages` and sends every message to all connected sessions.
+- The frontend `useMessages` hook receives messages on the WebSocket and triggers `loadCities()` to refetch the city grid.
 
 ---
 
-## What Should Be Propagated
+## Mutation Paths in Detail
 
-Every mutation to city state should reach connected clients. The following operations and their propagation status:
+### 1. Dashboard CRUD
 
-| Operation | Path | Currently Propagated? |
-|-----------|------|-----------------------|
-| Dashboard: createCity | HTTP → RabbitMQ → WS | ✅ Yes |
-| Dashboard: updateCity | HTTP → RabbitMQ → WS | ✅ Yes |
-| Dashboard: deleteCity | HTTP → RabbitMQ → WS | ✅ Yes |
-| Agent: createCity | Tool → RabbitMQ → WS | ✅ Yes |
-| Agent: updateCity | Tool → RabbitMQ → WS | ✅ Yes |
-| Agent: deleteCity | Tool → RabbitMQ → WS | ✅ Yes |
-| Agent: updateCities (batch) | Tool → RabbitMQ → WS | ✅ Yes |
-| **Agent: updateAllCities (bulk)** | **Tool → direct DB** | ❌ **No** |
-| **Agent: undoLastOperation** | **Tool → direct DB** | ❌ **No** |
-| **Agent: createSnapshot** | **Tool → direct DB** | ❌ **No** |
+```
+React POST/PUT/DELETE → Ktor route (authenticated)
+  → enqueueChange(CityCommand)
+  → RabbitMQ exchange → queue
+  → RabbitMQ Consumer
+  → CityChangeProcessor.apply()
+  → DB persist + ES reindex + ConsumerState.onMessage("city-changed")
+  → WebSocket broadcast → frontend refetch
+```
+
+### 2. Agent CRUD (single/batch)
+
+```
+LLM tool call (createCity, updateCity, deleteCity, updateCities)
+  → CityAgentTools.* method
+  → checkAuthorization → executionContext lookup
+  → enqueueChange(CityCommand)
+  → RabbitMQ → same chain as Dashboard CRUD ✓
+```
+
+### 3. Domain Operations (bulk/atomic)
+
+```
+LLM tool call (updateAllCities, undoLastOperation, createSnapshot)
+  → CityAgentTools.* method
+  → checkAuthorization → executionContext lookup
+  → cityService.*()  ← direct DB mutation (no RabbitMQ)
+  → build CityChangedEvent with operation, changes, affectedCount
+  → ConsumerState.onMessage(Json.encodeToString(event))
+  → WebSocket broadcast → frontend refetch
+```
+
+**Key difference:** Domain operations bypass RabbitMQ because they execute atomically within a single transaction. There is no need for async message processing — the event is emitted synchronously after the DB commit.
 
 ---
 
-## Design Principles
+## Structured Event Format
 
-### 1. Single Source of Truth for Notifications
-
-The `ConsumerState.onMessage(body)` function is the **only** entry point for notifying clients. Any code path that mutates city state must call it.
-
-Currently, `CityChangeProcessor.apply()` — the single point that persists CRUD commands — calls `ConsumerState.onMessage("city-changed")` at line 101. Domain operations bypass this entirely.
-
-### 2. Structured Change Events
-
-A generic `"city-changed"` string forces the frontend to do a full refetch. For richer UX, we need structured events that convey:
-
-- **What changed** (create, update, delete, update_all, undo, snapshot)
-- **How many entities** were affected
-- **Who initiated** it (user, agent conversation)
-- **Before/after values** (for undo/snapshot restore)
+Domain operations emit a `CityChangedEvent` serialized to JSON via `kotlinx.serialization`:
 
 ```kotlin
 @Serializable
 data class CityChangedEvent(
     val event: String = "city-changed",
-    val operation: String,          // "create", "update", "delete", "update_all", "undo", "snapshot"
+    val operation: String,          // "update_all", "undo", "snapshot"
     val conversationId: String? = null,
     val actorId: String? = null,
     val affectedCount: Int = 0,
@@ -159,129 +143,287 @@ data class CityChangeDetail(
 )
 ```
 
-### 3. Operation History Integration
+Example payload for `updateAllCities(50)`:
 
-Operation history is already persisted in the `city_operations` table (see `docs/solutions/domain-operation-design.md`). Every mutation — including domain operations — should record an operation record, and the `ConsumerState.onMessage()` call should carry the operation's structured metadata.
-
-### 4. Frontend Event Handling
-
-The frontend's `useMessages` hook in `frontend/src/hooks/useMessages.ts` currently:
-- Monitors for `"city-changed"` and triggers a full city refetch
-- Appends all other messages to the RabbitMQ messages display
-
-After structured events are introduced, the frontend should:
-- Display structured change notifications (e.g., "London: 13,961,300 → 13,961,350")
-- Show operation history events in a dedicated section
-- Handle `"auth-required"` via existing WebSocket close code 1008 handling
-
----
-
-## Proposed Architecture
-
-### Step 1: Make Domain Operations Emit Events
-
-After each domain operation completes in `CityService` or `CityAgentTools`, call `ConsumerState.onMessage()` with a structured JSON payload instead of the generic `"city-changed"` string.
-
-In `CityAgent.kt` domain tools:
-
-```kotlin
-fun updateAllCities(delta: Int, @ToolMemoryId conversationId: String): String {
-    return runCatching {
-        val result = cityService.updateAllPopulation(delta)
-        val actor = executionContexts.getValue(conversationId)
-        
-        // Emit structured event for WebSocket broadcast
-        val changes = result.changes.map { c ->
-            CityChangeDetail(c.id, c.name, c.beforePopulation, c.afterPopulation)
-        }
-        val event = CityChangedEvent(
-            operation = "update_all",
-            conversationId = conversationId,
-            actorId = actor.id,
-            affectedCount = result.affectedCount,
-            changes = changes,
-        )
-        ConsumerState.onMessage(Json.encodeToString(event))
-        
-        // ... format and return response text
-    }.getOrElse { ... }
+```json
+{
+  "event": "city-changed",
+  "operation": "update_all",
+  "actorId": "local:admin",
+  "affectedCount": 5,
+  "changes": [
+    { "id": 1, "name": "Tokyo", "beforePopulation": 13961300, "afterPopulation": 13961350 },
+    { "id": 2, "name": "Paris", "beforePopulation": 2161100, "afterPopulation": 2161150 }
+  ]
 }
 ```
 
-### Step 2: Add Event-Specific WebSocket Handling
+---
 
-The existing WebSocket loop in `Websocket.kt` (line 67–82) broadcasts `ConsumerState.messages` to all connected clients. This already works for any structured JSON message — no change needed to the WebSocket server.
+## Frontend Event Handling
 
-### Step 3: Enhance Frontend Event Handling
+### Message Reception (`frontend/src/hooks/useMessages.ts`)
 
-In `frontend/src/hooks/useMessages.ts`, parse structured events and handle each operation type:
+The `useMessages` hook receives WebSocket messages and classifies them:
 
 ```typescript
 socket.onmessage = (event) => {
   try {
     const message = JSON.parse(event.data) as WsMessage
-    
-    // Check if this is a structured city-changed event
-    const parsed = JSON.parse(message.body)
-    if (parsed.event === 'city-changed' && parsed.operation) {
-      switch (parsed.operation) {
-        case 'update_all':
-          displayBulkUpdateNotification(parsed)
-          break
-        case 'undo':
-          displayUndoNotification(parsed)
-          break
-        case 'snapshot':
-          displaySnapshotNotification(parsed)
-          break
-        case 'create':
-        case 'update':
-        case 'delete':
-          displayIndividualChangeNotification(parsed)
-          break
+    const body = typeof message.body === 'string' ? message.body : JSON.stringify(message.body)
+
+    try {
+      const parsed = JSON.parse(body)
+      // Structured event: has 'operation' field or event === 'city-changed'
+      if (parsed.operation || parsed.event === 'city-changed') {
+        onCityChanged?.()  // Triggers loadCities() refetch
+      } else {
+        setMessages(prev => [...prev, message])  // RabbitMQ messages
       }
-      onCityChanged?.()  // Still trigger refetch
-    } else if (typeof message.body === 'string') {
-      setMessages((current) => [...current, message])
+    } catch {
+      // Plain string message (e.g., legacy "city-changed")
+      if (body.includes('city-changed')) {
+        onCityChanged?.()
+      } else {
+        setMessages(prev => [...prev, message])
+      }
     }
   } catch {
-    // Ignore malformed messages
+    // Ignore malformed messages, keep connection alive
   }
 }
 ```
 
-### Step 4: Auth State Propagation
+**Parsing strategy:**
 
-The WebSocket already handles auth expiration via:
-- Server-side: `authenticationService.resolve()` check every 30s (line 42–49 in Websocket.kt)
-- Server-side: `authenticationService.resolve(socket.session)?.id != socket.user.id` before each broadcast (line 72)
-- Frontend: Closes with code 1008 → triggers `app-auth-required` event
+1. First try to parse `message.body` as JSON.
+2. If it's a structured event (has `operation` field or `event === 'city-changed'`), trigger city refetch.
+3. Otherwise, append to the RabbitMQ message display.
+4. If JSON parse fails, fall back to `body.includes('city-changed')` for backward compatibility with plain string messages.
 
-This auth chain is **working correctly**. No changes needed here.
+### City Reload Stability (`frontend/src/app/App.tsx`)
+
+The city reload callback is stabilized with a ref pattern:
+
+```typescript
+const cityReloadRef = useRef<() => void>(loadCities)
+useEffect(() => { cityReloadRef.current = loadCities }, [loadCities])
+
+const handleCityChanged = useCallback(() => {
+  cityReloadRef.current()
+}, [])
+
+// Stable reference passed to useMessages — prevents unnecessary WebSocket reconnects
+const { messages, connected } = useMessages(handleCityChanged, ...)
+```
+
+**Why this matters:** If `onCityChanged` is a new function reference on every render, `useMessages`'s `useEffect` cleanup fires, closing and reopening the WebSocket. This can drop incoming messages and cause the initial city list to be empty after login.
+
+### Auth-Triggered City Reload
+
+```typescript
+// Reload cities whenever auth state changes (login, logout, session refresh)
+useEffect(() => {
+  if (!auth.loading && auth.user) {
+    void loadCities()
+  }
+}, [auth.loading, auth.user, loadCities])
+```
+
+After successful login, `auth.user` transitions from `null` to `AuthenticatedUser`, triggering an immediate `loadCities()` call. This eliminates the "logged in but empty city list" problem.
 
 ---
 
-## Additional Propagation Opportunities
+## SSE Streaming and Keep-Alive
 
-Beyond the core city state changes, the following events would improve UX if propagated:
+### The Problem
 
-| Event | Value | Implementation |
-|-------|-------|----------------|
-| `operation-completed` | Shows confirmation of bulk operation with affected count | Emit from domain operation tools |
-| `auth-expired` | Explicitly notifies client before WebSocket drops | Server sends before closing with 1008 |
-| `operation-history-changed` | Client can update an operation history panel | Emit from `CityChangeProcessor` |
-| `agent-status` | Tells client the agent is processing/responding | Existing SSE handles this |
-| `login-success` / `login-failure` | Reacts to auth state changes | Existing polling + API error handling covers this |
+The LLM chat endpoint (`POST /demo/agent/chat/stream`) uses SSE to stream tokens back to the frontend. When the LLM takes more than ~10 seconds to generate its first token, the browser's `fetch` ReadableStream silently aborts the connection due to its implicit read timeout. This manifests on the server as:
+
+```
+WARN Application - Client disconnected during LLM stream for conversation {id} after 10002 ms
+```
+
+The server's `responseWriteTimeoutSeconds: 120` (configured in `application.yaml`) never triggers because the client already dropped the connection.
+
+### How Keep-Alive Works
+
+The streaming handler (`CityAgent.kt`, inside the `routes()` block) launches a background coroutine that writes keep-alive comments to the SSE stream every 5 seconds:
+
+```kotlin
+var firstTokenSent = false
+val keepAliveJob = GlobalScope.launch(Dispatchers.IO) {
+    try {
+        while (true && !firstTokenSent) {
+            delay(5000)
+            if (!firstTokenSent) {
+                writeStringUtf8(": keep-alive\n\n")
+                flush()
+            }
+        }
+    } catch (_: CancellationException) { }
+    catch (_: Exception) { }
+}
+
+try {
+    assistant.chat(conversationId, request.message)
+        .onPartialResponse { partial ->
+            responseText.append(partial)
+            firstTokenSent = true           // ← stops keep-alive
+            events.trySend(AgentStreamEvent("token", content = partial))
+        }
+        ...
+} finally {
+    keepAliveJob.cancel()                  // ← always clean up
+    events.cancel()
+}
+```
+
+**Critical detail — `flush()` must be called after `writeStringUtf8()`.** Without `flush()`, the keep-alive bytes sit in the `ByteWriteChannel` buffer and never reach the client. The 10-second browser timeout fires anyway. This was the root cause of the "keep-alive didn't work" debugging session.
+
+**Why keep-alive comments work:** SSE comments (lines starting with `:`) do NOT fire the JavaScript `onmessage` callback. They are invisible to application code but reset the TCP stream's read timer in the browser's fetch implementation, preventing the 10-second abort.
+
+### Server-Side Timeout Configuration
+
+`application.yaml` sets `ktor.deployment.netty.config.responseWriteTimeoutSeconds: 120` to allow the server to keep the connection open for up to 2 minutes. The keep-alive coroutine (5s interval) is well below this threshold.
+
+---
+
+## WriteTimeoutException Handling
+
+Even with keep-alive, long operations can still be interrupted (network issues, client navigation, etc.). The streaming handler's catch block detects `WriteTimeoutException` and `CancellationException`:
+
+```kotlin
+catch (error: Throwable) {
+    val elapsedMs = (System.nanoTime() - requestStartedAt) / 1_000_000
+    val isWriteTimeout = error::class.java.name == "io.netty.handler.timeout.WriteTimeoutException"
+        || error.cause?.let { it::class.java.name == "io.netty.handler.timeout.WriteTimeoutException" } ?: false
+
+    if (error is java.util.concurrent.CancellationException || isWriteTimeout) {
+        log.warn("Client disconnected during LLM stream for conversation {} after {} ms",
+                 request.conversationId, elapsedMs)
+    } else {
+        log.error("LLM chat stream failed for conversation {} after {} ms",
+                  request.conversationId, elapsedMs, error)
+    }
+}
+```
+
+This logs a clean `WARN` with the conversation ID and elapsed time — no noisy stack trace.
+
+---
+
+## Auth State Propagation
+
+### Server-Side Auth Check
+
+Every agent route validates the user before processing:
+
+- Route handlers use explicit `call.currentAuthenticatedUser()` with `WARN`/`INFO` logging (not silent `call.requirePermission`).
+- Tool-level `checkAuthorization` throws `ToolErrorVisibleToLlmException` (logged as `WARN` with user/permission details) instead of returning error strings.
+
+### WebSocket Auth
+
+- Server-side auth check runs every 30 seconds (`Websocket.kt`, line 42–49).
+- Server-side user validation runs before each broadcast (`Websocket.kt`, line 72).
+- On auth failure: WebSocket closes with code 1008 → frontend triggers `app-auth-required` event.
+- Auth polling in `AuthContext.tsx` (30s interval) keeps the frontend's auth state in sync.
+
+### Auth State Change → City Reload
+
+When auth state changes (login or logout), the effect in `App.tsx` calls `loadCities()`, ensuring the city grid is always populated after authentication.
+
+---
+
+## Operation History
+
+Operation history is persisted in the `city_operations` PostgreSQL table (see `docs/solutions/domain-operation-design.md`). Every domain operation:
+
+1. Executes the atomic DB mutation (e.g., `updateAllPopulation(delta)`).
+2. Records the operation in `city_operations` via `cityService`.
+3. Emits a structured `CityChangedEvent` via `ConsumerState.onMessage()`.
+4. Returns a human-readable summary to the LLM.
+
+The LLM can review operation history via the `listOperations()` and `operationHistory()` tools, which serve as the audit trail for all mutations.
+
+---
+
+## Troubleshooting Checklist
+
+When city updates don't propagate to clients, follow these steps:
+
+### 1. Check Server Logs
+
+```
+# Did the mutation execute?
+grep -i "RabbitMQ city change persisted" server.log      # CRUD path
+grep -i "updateAllPopulation\|undoLastOperation" server.log  # Domain ops
+
+# Did the event reach the WebSocket?
+grep -i "onMessage\|broadcast\|city-changed" server.log
+
+# SSE keep-alive / timeout?
+grep -i "keep-alive\|WriteTimeout\|Client disconnected" server.log
+```
+
+### 2. Verify Mutation Path
+
+| Symptom | Check |
+|---------|-------|
+| CRUD works, domain ops don't | Domain tools must call `ConsumerState.onMessage()` — check `CityAgentTools.updateAllCities`, `undoLastOperation`, `createSnapshot` |
+| Single city updates propagate but bulk doesn't | Bulk operations use domain tools, not CRUD tools — verify structured event emission |
+| Nothing propagates | Check `ConsumerState.onMessage()` is wired to both RabbitMQ consumer and domain tools |
+
+### 3. Check Frontend Message Handling
+
+```javascript
+// In browser DevTools console:
+// Check if structured events are parsed correctly
+// Look for: parsed.operation || parsed.event === 'city-changed' → triggers onCityChanged
+```
+
+### 4. SSE Timeout
+
+If the client disconnects after ~10 seconds:
+- Verify `writeStringUtf8(": keep-alive\n\n")` is followed by `flush()`.
+- Verify `firstTokenSent = true` is set inside `onPartialResponse`.
+- Verify `keepAliveJob.cancel()` is in the `finally` block.
+
+### 5. Empty City List After Login
+
+- Check that `auth.user` is not `null` after login.
+- Check that the auth-triggered `useEffect` fires (watch for `loadCities` network call in DevTools).
+- Check that the WebSocket `onCityChanged` callback fires on connection (check for stable reference in `useMessages`).
+
+---
+
+## Complete Operation Matrix
+
+| Operation | Origin | Mutation Path | Event Emitted? | WebSocket Propagated? |
+|-----------|--------|---------------|----------------|----------------------|
+| Dashboard: create | HTTP POST | → RabbitMQ → Consumer → DB → `onMessage` | ✅ | ✅ |
+| Dashboard: update | HTTP PUT | → RabbitMQ → Consumer → DB → `onMessage` | ✅ | ✅ |
+| Dashboard: delete | HTTP DELETE | → RabbitMQ → Consumer → DB → `onMessage` | ✅ | ✅ |
+| Agent: createCity | LLM tool | → enqueueChange → RabbitMQ → same chain | ✅ | ✅ |
+| Agent: updateCity | LLM tool | → enqueueChange → RabbitMQ → same chain | ✅ | ✅ |
+| Agent: deleteCity | LLM tool | → enqueueChange → RabbitMQ → same chain | ✅ | ✅ |
+| Agent: updateCities (batch) | LLM tool | → enqueueChange ×N → RabbitMQ → same chain | ✅ | ✅ |
+| **Agent: updateAllCities** | LLM tool | → `cityService.updateAllPopulation` → DB → `onMessage` | ✅ JSON event | ✅ |
+| **Agent: undoLastOperation** | LLM tool | → `cityService.undoLastOperation` → DB → `onMessage` | ✅ JSON event | ✅ |
+| **Agent: createSnapshot** | LLM tool | → `cityService.createSnapshot` → DB → `onMessage` | ✅ JSON event | ✅ |
+
+All operations now propagate. The key insight is that **every mutation path must call `ConsumerState.onMessage()`** — whether it arrives via RabbitMQ (CRUD) or directly from domain tools (bulk/atomic operations).
 
 ---
 
 ## Summary
 
-| Concern | Current State | Required Action |
-|---------|---------------|-----------------|
-| Dashboard CRUD propagation | ✅ Full chain via RabbitMQ → WS → Frontend | None |
-| Agent CRUD propagation | ✅ Full chain via RabbitMQ → WS → Frontend | None |
-| Domain operation propagation | ❌ DB modified, WS never notified | Emit structured `CityChangedEvent` from domain tools |
-| Auth state propagation | ✅ WebSocket close code 1008 + frontend polling | None |
-| Structured change display | ❌ Frontend only triggers full refetch | Add structured event parsing in `useMessages` |
-| Operation history sync | ❌ No real-time sync of operation history | Add `operation-history-changed` event emission |
+| Concern | Status | Notes |
+|---------|--------|-------|
+| CRUD propagation (dashboard/agent) | ✅ Working | Via RabbitMQ → Consumer → `onMessage` |
+| Domain operation propagation | ✅ Working | Direct `onMessage` with structured JSON |
+| Frontend structured event parsing | ✅ Working | JSON parse → `operation` check → refetch |
+| SSE keep-alive | ✅ Working | 5s interval with `flush()` |
+| Auth-triggered city reload | ✅ Working | Effect on `auth.user` change |
+| WriteTimeout graceful handling | ✅ Working | WARN log with conversation ID |
+| Auth state propagation | ✅ Working | WebSocket 1008 + polling + explicit logging |

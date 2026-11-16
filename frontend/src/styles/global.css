@@ -53,6 +53,32 @@ code { border-radius: .35rem; background: #eef2ff; color: #3730a3; padding: .15r
 .login-form input { margin: 0; }
 .error-message { color: #b91c1c; }
 
+.chat-message.working {
+  background: linear-gradient(135deg, #fef3c7, #fde68a);
+  border: 1px solid #f59e0b;
+  margin-right: 1.5rem;
+  animation: workingPulse 2s ease-in-out infinite;
+}
+
+.chat-message.working.fade-out {
+  opacity: 0;
+  transition: opacity 0.4s ease-out;
+}
+
+@keyframes workingPulse {
+  0%, 100% { box-shadow: 0 2px 8px rgb(245 158 11 / 15%); }
+  50%      { box-shadow: 0 4px 16px rgb(245 158 11 / 30%); }
+}
+
+@keyframes workingFadeIn {
+  from { opacity: 0; transform: translateY(6px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+.chat-message.working {
+  animation: workingPulse 2s ease-in-out infinite, workingFadeIn 0.3s ease-out;
+}
+
 @media (min-width: 1100px) {
   .dashboard-layout { align-items: start; grid-template-areas: "assistant main"; grid-template-columns: minmax(18rem, .85fr) minmax(0, 1.15fr); }
   .assistant-card { position: sticky; top: 1.5rem; }
