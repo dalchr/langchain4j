@@ -57,8 +57,8 @@ export function App() {
     setTimeout(() => chatTextareaRef.current?.focus(), 0)
   }, [])
   const [pendingAction, setPendingAction] = useState<PendingAction | null>(null)
-  const [loginUsername, setLoginUsername] = useState('chris')
-  const [loginPassword, setLoginPassword] = useState('')
+  const [loginUsername, setLoginUsername] = useState('admin') // TODO: reset
+  const [loginPassword, setLoginPassword] = useState('admin') // TODO: reset
   const [loginError, setLoginError] = useState('')
   const [loggingIn, setLoggingIn] = useState(false)
   const [loggingOut, setLoggingOut] = useState(false)

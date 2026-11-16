@@ -1,6 +1,10 @@
 ktor:
   deployment:
     port: 8080
+    responseTimeout: 120
+  netty:
+    config:
+      responseWriteTimeoutSeconds: 120
   application:
     modules:
       - com.example.SerializationKt.configureSerialization

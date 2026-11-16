@@ -13,6 +13,9 @@ application {
 
 kotlin {
     jvmToolchain(21)
+    compilerOptions {
+        freeCompilerArgs.add("-java-parameters")
+    }
 }
 dependencies {
     implementation(ktorLibs.serialization.kotlinx.json)
