@@ -38,3 +38,9 @@ dependencies {
     testImplementation(kotlin("test"))
     testImplementation(ktorLibs.server.testHost)
 }
+
+tasks.register<Exec>("stopServer") {
+    group = "server"
+    description = "Stops the running Ktor server (inversion of the 'run' task)"
+    commandLine = listOf("bash", "stop-server.sh")
+}
