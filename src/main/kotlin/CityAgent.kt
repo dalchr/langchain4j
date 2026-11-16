@@ -37,6 +37,7 @@ import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 import java.time.Duration
 import java.time.Instant
+import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.ConcurrentHashMap
 import dev.langchain4j.service.UserMessage as UserMessageAnnotation
 
@@ -44,7 +45,7 @@ import dev.langchain4j.service.UserMessage as UserMessageAnnotation
 data class AgentChatRequest(val conversationId: String, val message: String)
 
 @Serializable
-data class AgentStreamEvent(val type: String, val content: String? = null, val error: String? = null)
+data class AgentStreamEvent(val type: String, val content: String? = null, val error: String? = null, val roundtrips: Int? = null)
 
 internal data class AgentConversation(
     val memory: ChatMemory,
@@ -71,6 +72,20 @@ internal fun recoverFromUnknownCityTool(request: ToolExecutionRequest): ToolExec
             "updateAllCities, listOperations, undoLastOperation, createSnapshot. " +
             "Retry the requested action using the appropriate exact tool name.",
     )
+
+/**
+ * Count how many tool-call roundtrips the model has made so far.
+ * Each [AiMessage] that carries one or more [ToolExecutionRequest] counts as one roundtrip.
+ */
+internal fun countToolRoundtrips(messages: List<dev.langchain4j.data.message.ChatMessage>): Int {
+    var count = 0
+    for (msg in messages) {
+        if (msg is AiMessage && msg.hasToolExecutionRequests()) {
+            count++
+        }
+    }
+    return count
+}
 
 internal fun populationFromReply(message: String): Int? {
     val values = Regex("(?<![\\p{L}\\p{N}])-?\\d[\\d,]*(?![\\p{L}\\p{N}])")
@@ -681,6 +696,7 @@ class CityAgent(
                             val responseText = StringBuilder()
                             var firstTokenSent = false
                             var keepAliveCount = 0
+                            var reportedRoundtrips = -1
                             val keepAliveJob = GlobalScope.launch(Dispatchers.IO) {
                                 try {
                                     while (true && !firstTokenSent) {
@@ -690,10 +706,16 @@ class CityAgent(
                                             val waitSeconds = keepAliveCount * 5
                                             writeStringUtf8(": keep-alive\n\n")
                                             flush()
+                                            val currentRoundtrips = countToolRoundtrips(conversation.memory.messages())
+                                            val hasNewRoundtrip = currentRoundtrips > reportedRoundtrips
+                                            if (hasNewRoundtrip) {
+                                                reportedRoundtrips = currentRoundtrips
+                                            }
                                             events.trySend(
                                                 AgentStreamEvent(
                                                     "working",
                                                     content = "The assistant isn't sleeping, just working hard to fulfill the requested operation. Please wait! ($waitSeconds seconds elapsed)",
+                                                    roundtrips = if (hasNewRoundtrip) currentRoundtrips else null,
                                                 ),
                                             )
                                         }
@@ -702,6 +724,7 @@ class CityAgent(
                                 } catch (_: Exception) {
                                 }
                             }
+                            val toolRoundtripBaseline = countToolRoundtrips(conversation.memory.messages())
                             try {
                                 assistant.chat(conversationId, request.message)
                                     .onPartialResponse { partial ->
@@ -711,12 +734,13 @@ class CityAgent(
                                     }
                                     .onCompleteResponse {
                                         val response = responseText.toString()
+                                        val totalRoundtrips = countToolRoundtrips(conversation.memory.messages()) - toolRoundtripBaseline
                                         if (response.isBlank()) {
-                                            log.warn("LLM chat completed without text for conversation {} ({} ms)", request.conversationId, (System.nanoTime() - requestStartedAt) / 1_000_000)
-                                            events.trySend(AgentStreamEvent("error", error = "The assistant returned an empty response. Please try again."))
+                                            log.warn("LLM chat completed without text for conversation {} ({} ms, {} tool roundtrips)", request.conversationId, (System.nanoTime() - requestStartedAt) / 1_000_000, totalRoundtrips)
+                                            events.trySend(AgentStreamEvent("error", error = "The assistant returned an empty response after $totalRoundtrips tool roundtrip(s). Please try again."))
                                         } else {
                                             tools.recordMessage(conversationId, "assistant", response, user.id)
-                                            log.info("LLM chat completed for conversation {} ({} ms, {} characters)", request.conversationId, (System.nanoTime() - requestStartedAt) / 1_000_000, response.length)
+                                            log.info("LLM chat completed for conversation {} ({} ms, {} characters, {} tool roundtrips)", request.conversationId, (System.nanoTime() - requestStartedAt) / 1_000_000, response.length, totalRoundtrips)
                                             events.trySend(AgentStreamEvent("done"))
                                         }
                                         events.close()

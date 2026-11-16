@@ -54,6 +54,7 @@ export function App() {
   const [agentStatus, setAgentStatus] = useState('')
   const [workingMessage, setWorkingMessage] = useState<string | null>(null)
   const [isWorkingFading, setIsWorkingFading] = useState(false)
+  const [accumulatedRoundtrips, setAccumulatedRoundtrips] = useState(0)
 
   useEffect(() => {
     setTimeout(() => chatTextareaRef.current?.focus(), 0)
@@ -189,6 +190,7 @@ export function App() {
     setIsWorkingFading(true)
     setTimeout(() => {
       setWorkingMessage(null)
+      setAccumulatedRoundtrips(0)
       setIsWorkingFading(false)
     }, 400)
   }
@@ -213,6 +215,9 @@ export function App() {
             : entry))
         } else if (event.type === 'working') {
           setWorkingMessage(event.content ?? 'The assistant is working on your request…')
+          if (event.roundtrips != null && event.roundtrips > accumulatedRoundtrips) {
+            setAccumulatedRoundtrips(event.roundtrips)
+          }
         } else if (event.type === 'error') {
           clearWorkingMessage()
           setConversation((current) => current.map((entry) => entry.id === responseId
@@ -366,9 +371,10 @@ export function App() {
               </article>
             ))}
             {workingMessage && (
-              <article className="chat-message working" aria-live="polite">
+              <article className={`chat-message working ${isWorkingFading ? 'fade-out' : ''}`} aria-live="polite">
                 <strong>Assistant</strong>
                 <p>{workingMessage}</p>
+                {accumulatedRoundtrips > 0 && <p className="muted">Tool roundtrips: {accumulatedRoundtrips}</p>}
               </article>
             )}
           </div>
