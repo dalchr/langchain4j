@@ -1,3 +1,5 @@
+#!/bin/bash
+set -e
 cd frontend
 npm ci
-npm run dev
+nohup npm run dev > nohup-fe.out &
