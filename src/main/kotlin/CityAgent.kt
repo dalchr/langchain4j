@@ -126,6 +126,7 @@ private interface CityAssistant {
 }
 
 internal class CityAgentTools(
+    private val log: org.slf4j.Logger,
     private val conversations: AgentConversationRegistry,
     private val searchCities: (String) -> List<CityView>,
     private val listCities: () -> List<CityView>,
@@ -372,14 +373,29 @@ internal class CityAgentTools(
         history.add(AgentHistoryEntry(role, content, actorId = actorId))
     }
 
+    fun clearExecutionContextsForUser(userId: String) {
+        executionContexts.entries.removeIf { (_, user) -> user.id == userId }
+    }
+
+    /**
+     * Get the user ID for a given conversation's execution context, if one exists.
+     */
+    fun executionContextUserFor(conversationId: String): String? {
+        return executionContexts[conversationId]?.id
+    }
+
     private fun recordOperation(conversationId: String, description: String, actorId: String) {
         recordMessage(conversationId, "city_operation", description, actorId)
     }
 
     private fun checkAuthorization(conversationId: String, permission: Permission) {
         val user = executionContexts[conversationId]
-            ?: throw ToolErrorVisibleToLlm.from("Please log in before accessing city assistant tools.")
+            ?: run {
+                log.warn("Agent tool execution rejected: no execution context for conversation {} (user likely logged out)", conversationId)
+                throw ToolErrorVisibleToLlm.from("Please log in before accessing city assistant tools.")
+            }
         if (!AuthorizationService.hasPermission(user, permission)) {
+            log.warn("Agent tool execution rejected: user {} lacks permission {}", user.username, permission.name)
             throw ToolErrorVisibleToLlm.from("You are not allowed to perform this operation.")
         }
     }
@@ -425,7 +441,7 @@ class CityAgent(
     enqueueChange: (CityCommand) -> Unit,
 ) {
     private val conversations = AgentConversationRegistry()
-    private val tools = CityAgentTools(conversations, searchCities, listCities, enqueueChange)
+    private val tools = CityAgentTools(application.log, conversations, searchCities, listCities, enqueueChange)
     private val assistant = AiServices.builder(CityAssistant::class.java)
         .streamingChatModel(
             OpenAiStreamingChatModel.builder()
@@ -445,7 +461,7 @@ class CityAgent(
 
     fun Route.routes() {
         post("/demo/agent/conversation/reset") {
-            if (!call.requirePermission(Permission.CHAT_ACCESS) || !call.requireCsrfToken()) return@post
+            if (!call.requireCsrfToken()) return@post
             val request = runCatching { call.receive<AgentResetRequest>() }.getOrElse {
                 call.respond(HttpStatusCode.BadRequest, "Invalid conversation reset request")
                 return@post
@@ -454,16 +470,20 @@ class CityAgent(
                 call.respond(HttpStatusCode.BadRequest, "A valid conversation ID is required")
                 return@post
             }
-            val user = call.currentAuthenticatedUser() ?: run {
-                call.respond(HttpStatusCode.Unauthorized)
+            val user = call.currentAuthenticatedUser()
+            if (user == null) {
+                log.warn("Agent conversation reset rejected: unauthenticated request for conversation {} from IP {}",
+                         request.conversationId, call.request.local.remoteHost)
+                call.respond(HttpStatusCode.Unauthorized, "Please log in to use the city assistant.")
                 return@post
             }
+            log.info("Agent conversation reset accepted: user {} for conversation {}", user.username, request.conversationId)
             conversations.reset(agentConversationKey(user, request.conversationId))
             call.respond(HttpStatusCode.OK, "Conversation restarted")
         }
 
         post("/demo/agent/chat/stream") {
-            if (!call.requirePermission(Permission.CHAT_ACCESS) || !call.requireCsrfToken()) return@post
+            if (!call.requireCsrfToken()) return@post
             val request = runCatching { call.receive<AgentChatRequest>() }.getOrElse {
                 call.respond(HttpStatusCode.BadRequest, "Invalid chat request")
                 return@post
@@ -474,11 +494,32 @@ class CityAgent(
                 call.respond(HttpStatusCode.BadRequest, "A conversation ID and a message of at most 4000 characters are required")
                 return@post
             }
-            val user = call.currentAuthenticatedUser() ?: run {
-                call.respond(HttpStatusCode.Unauthorized)
+
+            val user = call.currentAuthenticatedUser()
+            if (user == null) {
+                log.warn("Agent chat rejected: unauthenticated request for conversation {} from IP {}",
+                         request.conversationId, call.request.local.remoteHost)
+                call.respondBytesWriter(ContentType.Text.EventStream) {
+                    writeStringUtf8("data: ${Json.encodeToString(AgentStreamEvent("error", error = "Please log in to use the city assistant."))}\n\n")
+                    flush()
+                }
                 return@post
             }
+            log.info("Agent chat accepted: user {} for conversation {}", user.username, request.conversationId)
             val conversationId = agentConversationKey(user, request.conversationId)
+
+            // Validate no stale context from another user
+            tools.executionContextUserFor(conversationId)?.let { existingUserId ->
+                if (existingUserId != user.id) {
+                    log.warn("Agent chat rejected: stale execution context for conversation {} belongs to user {} but request is from user {}",
+                             request.conversationId, existingUserId, user.id)
+                    call.respondBytesWriter(ContentType.Text.EventStream) {
+                        writeStringUtf8("data: ${Json.encodeToString(AgentStreamEvent("error", error = "Your session changed. Please restart the assistant conversation."))}\n\n")
+                        flush()
+                    }
+                    return@post
+                }
+            }
 
             call.respondBytesWriter(ContentType.Text.EventStream) {
                 val conversation = conversations.get(conversationId)

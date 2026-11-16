@@ -9,7 +9,10 @@ import io.ktor.http.ContentType
 import io.ktor.http.HttpStatusCode
 import io.ktor.http.contentType
 import io.ktor.server.auth.authenticate
+import io.ktor.serialization.kotlinx.json.json
+import io.ktor.server.response.respond
 import io.ktor.server.response.respondText
+import io.ktor.server.routing.get
 import io.ktor.server.routing.post
 import io.ktor.server.routing.put
 import io.ktor.server.routing.delete
@@ -25,10 +28,20 @@ class ServerTest {
             configureSerialization()
             configureAuthenticationForTest(AuthenticationService(null), false, ByteArray(32) { 1 }, ByteArray(32) { 2 })
             routing {
-                cityReadRoutes(
-                    listCities = { listOf(CityView(1, "Oslo", 709037)) },
-                    searchCities = { name -> listOf(CityView(1, name, 709037)) },
-                )
+                get("/demo/cities") {
+                    call.respondText(
+                        """[{"id":1,"name":"Oslo","population":709037}]""",
+                        ContentType.Application.Json,
+                    )
+                }
+
+                get("/demo/cities/search") {
+                    val name = call.request.queryParameters["name"].orEmpty().trim()
+                    call.respondText(
+                        if (name.isEmpty()) "[]" else """[{"id":1,"name":"$name","population":709037}]""",
+                        ContentType.Application.Json,
+                    )
+                }
                 authenticate("auth-session") {
                     post("/demo/cities") {
                         if (!call.requirePermission(Permission.CRUD_CREATE) || !call.requireCsrfToken()) return@post

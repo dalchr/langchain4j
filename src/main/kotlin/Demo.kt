@@ -111,20 +111,6 @@ fun Application.configureDemo() {
     }.onFailure { app.log.warn("Elasticsearch is unavailable; city search will retry on the next restart", it) }
 
     routing {
-        cityReadRoutes(
-            listCities = {
-                val stmt = dbConnection.createStatement()
-                val rs = stmt.executeQuery("SELECT id, name, population FROM cities ORDER BY id")
-                buildList {
-                    while (rs.next()) add(CityView(rs.getInt(1), rs.getString(2), rs.getInt(3)))
-                }
-            },
-            searchCities = { name ->
-                runCatching { withContext(Dispatchers.IO) { elasticsearch.searchByName(name) } }
-                    .getOrElse { throw IllegalStateException("City search is unavailable", it) }
-            },
-        )
-
         authenticate("auth-session") {
         // Main demo page
         get("/demo") {
@@ -390,25 +376,29 @@ async function viewConsumedMessages() {
 
         with(cityAgent) { routes() }
 
+        // GET /demo/cities - list all cities (authenticated only)
+        get("/demo/cities") {
+            val stmt = dbConnection.createStatement()
+            val rs = stmt.executeQuery("SELECT id, name, population FROM cities ORDER BY id")
+            call.respond(buildList {
+                while (rs.next()) add(CityView(rs.getInt(1), rs.getString(2), rs.getInt(3)))
+            })
+        }
+
+        get("/demo/cities/search") {
+            val name = call.request.queryParameters["name"].orEmpty().trim()
+            call.respond(
+                if (name.isEmpty()) emptyList() else runCatching {
+                    withContext(Dispatchers.IO) { elasticsearch.searchByName(name) }
+                }.getOrElse { throw IllegalStateException("City search is unavailable", it) }
+            )
+        }
+
         // GET /demo/rabbitmq/consumed - list messages consumed by the consumer
         get("/demo/rabbitmq/consumed") {
             if (!call.requirePermission(Permission.CRUD_READ)) return@get
             call.respond(ConsumerState.consumedMessages.toList())
         }
         }
-    }
-}
-
-internal fun Route.cityReadRoutes(
-    listCities: suspend () -> List<CityView>,
-    searchCities: suspend (String) -> List<CityView>,
-) {
-    get("/demo/cities") {
-        call.respond(listCities())
-    }
-
-    get("/demo/cities/search") {
-        val name = call.request.queryParameters["name"].orEmpty().trim()
-        call.respond(if (name.isEmpty()) emptyList() else searchCities(name))
     }
 }

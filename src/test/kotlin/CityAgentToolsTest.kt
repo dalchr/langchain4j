@@ -19,6 +19,7 @@ class CityAgentToolsTest {
     private val commands = mutableListOf<CityCommand>()
     private val user = AuthenticatedUser("local:test-user", "test-user", "Test User")
     private val tools = CityAgentTools(
+        log = org.slf4j.LoggerFactory.getLogger("CityAgentToolsTest"),
         conversations = conversations,
         searchCities = { query -> cities.filter { it.name.contains(query, ignoreCase = true) } },
         listCities = { cities },
