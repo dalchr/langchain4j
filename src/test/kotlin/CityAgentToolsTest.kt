@@ -6,6 +6,7 @@ import kotlin.test.assertNull
 import kotlin.test.assertTrue
 import dev.langchain4j.data.message.UserMessage
 import dev.langchain4j.agent.tool.ToolExecutionRequest
+import dev.langchain4j.exception.ToolErrorVisibleToLlmException
 import kotlinx.coroutines.runBlocking
 import java.time.Instant
 
@@ -178,20 +179,24 @@ class CityAgentToolsTest {
 
     @Test
     fun `city mutation tools reject calls without authenticated execution context`() {
-        val answer = tools.deleteCity("Oslo", -1, "conversation-1")
+        val exception = runCatching { tools.deleteCity("Oslo", -1, "conversation-1") }.exceptionOrNull()
 
-        assertTrue(answer.startsWith("AUTHENTICATION_REQUIRED:"))
+        assertTrue(exception is ToolErrorVisibleToLlmException)
+        assertTrue(exception?.message?.contains("Please log in") == true)
         assertTrue(commands.isEmpty())
     }
 
     @Test
     fun `city mutation tools reject users without permission before enqueueing`() {
         val reader = user.copy(roles = listOf("READER"))
-        val answer = asUser("conversation-1", reader) {
-            tools.deleteCity("Oslo", -1, "conversation-1")
-        }
+        val exception = runCatching {
+            asUser("conversation-1", reader) {
+                tools.deleteCity("Oslo", -1, "conversation-1")
+            }
+        }.exceptionOrNull()
 
-        assertTrue(answer.startsWith("PERMISSION_DENIED:"))
+        assertTrue(exception is ToolErrorVisibleToLlmException)
+        assertTrue(exception?.message?.contains("not allowed") == true)
         assertTrue(commands.isEmpty())
     }
 
@@ -273,12 +278,15 @@ class CityAgentToolsTest {
 
     @Test
     fun `updateCities rejects without authenticated execution context`() {
-        val answer = tools.updateCities(
-            listOf(CityPopulationUpdate("Oslo", 720000)),
-            "conversation-1",
-        )
+        val exception = runCatching {
+            tools.updateCities(
+                listOf(CityPopulationUpdate("Oslo", 720000)),
+                "conversation-1",
+            )
+        }.exceptionOrNull()
 
-        assertTrue(answer.startsWith("AUTHENTICATION_REQUIRED:"))
+        assertTrue(exception is ToolErrorVisibleToLlmException)
+        assertTrue(exception?.message?.contains("Please log in") == true)
     }
 
     private fun <T> asUser(

@@ -6,10 +6,16 @@ import io.github.damir.denis.tudor.ktor.server.rabbitmq.rabbitMQ
 import io.ktor.http.*
 import io.ktor.server.application.*
 import io.ktor.server.auth.authenticate
+import io.ktor.server.engine.*
+import io.ktor.server.netty.NettyApplicationEngine
 import io.ktor.server.plugins.*
 import io.ktor.server.request.*
 import io.ktor.server.response.*
 import io.ktor.server.routing.*
+import io.netty.channel.ChannelHandler.Sharable
+import io.netty.channel.ChannelHandlerContext
+import io.netty.channel.ChannelInboundHandlerAdapter
+import io.netty.handler.timeout.WriteTimeoutException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.runBlocking
@@ -17,8 +23,41 @@ import kotlinx.serialization.json.Json
 import java.sql.Connection
 import java.sql.DriverManager
 
+/**
+ * Netty channel handler that catches WriteTimeoutException and CancellationException
+ * before Netty's default handler processes them. Logs them as WARN instead of ERROR
+ * with full stack trace, making them traceable and quiet.
+ */
+@Sharable
+private class ApplicationExceptionHandler(
+    private val applicationLog: org.slf4j.Logger,
+) : ChannelInboundHandlerAdapter() {
+
+    override fun exceptionCaught(ctx: ChannelHandlerContext, cause: Throwable) {
+        val isWriteTimeout = cause::class.java.name == "io.netty.handler.timeout.WriteTimeoutException"
+        val isCancellation = cause is java.util.concurrent.CancellationException
+
+        if (isWriteTimeout || isCancellation) {
+            if (isWriteTimeout) {
+                applicationLog.warn("Client disconnected during streaming: {}", cause.message)
+            } else {
+                applicationLog.warn("Client request cancelled: {}", cause.message)
+            }
+        } else {
+            super.exceptionCaught(ctx, cause)
+        }
+    }
+}
+
 fun Application.configureDemo() {
     val app = this
+
+    // Install Netty pipeline handler to catch WriteTimeoutException before it becomes a 502 error
+    val nettyEngine = engine as? NettyApplicationEngine
+    nettyEngine?.configuration?.channelPipelineConfig = {
+        addLast("applicationExceptionHandler", ApplicationExceptionHandler(app.log))
+    }
+
     val isEmbedded = environment.config.propertyOrNull("postgres.embedded")?.getString()
         ?.toBoolean() ?: false
     val dbConnection: Connection = DriverManager.getConnection(

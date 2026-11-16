@@ -18,6 +18,7 @@ import dev.langchain4j.service.SystemMessage
 import dev.langchain4j.service.TokenStream
 import dev.langchain4j.service.tool.ToolArgumentsErrorHandler
 import dev.langchain4j.service.tool.ToolExecutionErrorHandler
+import dev.langchain4j.exception.ToolErrorVisibleToLlm
 import io.ktor.http.*
 import io.ktor.server.application.*
 import io.ktor.server.request.*
@@ -139,7 +140,7 @@ internal class CityAgentTools(
 
     @Tool("List all cities currently registered and their populations. Use this for general questions about the cities.")
     fun listCities(@ToolMemoryId conversationId: String): String {
-        authorizationFailure(conversationId, Permission.CRUD_READ)?.let { return it }
+        checkAuthorization(conversationId, Permission.CRUD_READ)
         return runCatching {
             listCities.invoke().joinToString("\n") { "${it.name}: ${it.population}" }
                 .ifEmpty { "No cities are currently registered." }
@@ -151,7 +152,7 @@ internal class CityAgentTools(
         @P(name = "name", value = "The city name to look up") name: String,
         @ToolMemoryId conversationId: String,
     ): String {
-        authorizationFailure(conversationId, Permission.CRUD_READ)?.let { return it }
+        checkAuthorization(conversationId, Permission.CRUD_READ)
         val lookup = lookupCity(name)
         val city = lookup.city ?: return lookup.failure ?: "No city found with name '$name'."
         return "${city.name} exists and its current registered population is ${city.population}."
@@ -162,7 +163,7 @@ internal class CityAgentTools(
         @P(value = "The city's population", defaultValue = "-1") population: Int,
         @ToolMemoryId conversationId: String,
     ): String {
-        authorizationFailure(conversationId, Permission.CRUD_CREATE)?.let { return it }
+        checkAuthorization(conversationId, Permission.CRUD_CREATE)
         if (name.isBlank()) return "I need a city name before I can create a city."
         if (population < 0) {
             conversations.get(conversationId).pendingCreateName = name.trim()
@@ -193,7 +194,7 @@ internal class CityAgentTools(
         @P(value = "The current population of the city to identify it when multiple cities share the same name", defaultValue = "-1") disambiguatingPopulation: Int,
         @ToolMemoryId conversationId: String,
     ): String {
-        authorizationFailure(conversationId, Permission.CRUD_UPDATE)?.let { return it }
+        checkAuthorization(conversationId, Permission.CRUD_UPDATE)
         if (name.isBlank() || population < 0) return "A non-empty city name and a non-negative population are required."
         val lookup = lookupCity(existingName)
         val city = when {
@@ -237,7 +238,7 @@ internal class CityAgentTools(
         @P(value = "The population to disambiguate when multiple cities share the same name", defaultValue = "-1") population: Int,
         @ToolMemoryId conversationId: String,
     ): String {
-        authorizationFailure(conversationId, Permission.CRUD_DELETE)?.let { return it }
+        checkAuthorization(conversationId, Permission.CRUD_DELETE)
         val lookup = lookupCity(name)
         val city = when {
             lookup.city != null -> lookup.city
@@ -266,7 +267,7 @@ internal class CityAgentTools(
         @P(value = "A list of cities to update, each with the city name and new population") updates: List<CityPopulationUpdate>,
         @ToolMemoryId conversationId: String,
     ): String {
-        authorizationFailure(conversationId, Permission.CRUD_UPDATE)?.let { return it }
+        checkAuthorization(conversationId, Permission.CRUD_UPDATE)
         val results = mutableListOf<String>()
         var successCount = 0
 
@@ -319,7 +320,7 @@ internal class CityAgentTools(
     }
 
     fun completePendingCreate(conversationId: String, population: Int): String? {
-        authorizationFailure(conversationId, Permission.CRUD_CREATE)?.let { return it }
+        checkAuthorization(conversationId, Permission.CRUD_CREATE)
         val conversation = conversations.get(conversationId)
         val name = conversation.pendingCreateName ?: return null
         if (population < 0) {
@@ -344,7 +345,7 @@ internal class CityAgentTools(
 
     @Tool("Review this conversation's messages and city operations, including committed changes made through the dashboard. Use this for questions about what was previously created, updated, or deleted.")
     fun operationHistory(@ToolMemoryId conversationId: String): String {
-        authorizationFailure(conversationId, Permission.CHAT_ACCESS)?.let { return it }
+        checkAuthorization(conversationId, Permission.CHAT_ACCESS)
         val history = conversations.get(conversationId).activityHistory
         val entries = (history.filter { it.role != "city_operation" } +
             CityOperationHistory.snapshot()
@@ -375,14 +376,11 @@ internal class CityAgentTools(
         recordMessage(conversationId, "city_operation", description, actorId)
     }
 
-    private fun authorizationFailure(conversationId: String, permission: Permission): String? {
+    private fun checkAuthorization(conversationId: String, permission: Permission) {
         val user = executionContexts[conversationId]
-            ?: return "AUTHENTICATION_REQUIRED: Please log in before accessing city assistant tools."
-        return if (AuthorizationService.hasPermission(user, permission)) {
-            null
-        } else {
-            println("PERMISSION_DENIED: You are not allowed to perform this operation.")
-            "PERMISSION_DENIED: You are not allowed to perform this operation."
+            ?: throw ToolErrorVisibleToLlm.from("Please log in before accessing city assistant tools.")
+        if (!AuthorizationService.hasPermission(user, permission)) {
+            throw ToolErrorVisibleToLlm.from("You are not allowed to perform this operation.")
         }
     }
 
@@ -544,8 +542,16 @@ class CityAgent(
                                     .start()
                                 for (event in events) writeEvent(event)
                             } catch (error: Throwable) {
-                                log.error("Unable to start LLM chat stream", error)
-                                writeEvent(AgentStreamEvent("error", error = "The assistant is temporarily unavailable."))
+                                val elapsedMs = (System.nanoTime() - requestStartedAt) / 1_000_000
+                                val isWriteTimeout = error::class.java.name == "io.netty.handler.timeout.WriteTimeoutException"
+                                    || error.cause?.let { cause ->
+                                        cause::class.java.name == "io.netty.handler.timeout.WriteTimeoutException"
+                                    } ?: false
+                                if (error is java.util.concurrent.CancellationException || isWriteTimeout) {
+                                    log.warn("Client disconnected during LLM stream for conversation {} after {} ms", request.conversationId, elapsedMs)
+                                } else {
+                                    log.error("LLM chat stream failed for conversation {} after {} ms", request.conversationId, elapsedMs, error)
+                                }
                             } finally {
                                 events.cancel()
                             }
