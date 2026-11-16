@@ -88,6 +88,10 @@ For city-related questions, the assistant uses its city-context tools rather tha
 
 The agent tooling follows a "LLM = intent, Application = execution" pattern: complex multi-entity operations are delegated to deterministic service methods (e.g., `updateAllCities(delta)` applies a population change to every city atomically, without the model constructing individual update payloads). This approach eliminates the fragility of having the LLM manage entity state across conversation turns. See `docs/solutions/domain-operation-design.md` for the full design principles, tool taxonomy, anti-patterns, and testing checklist.
 
+### Real-Time State Propagation
+
+All city mutations flow through a single notification pipeline: `ConsumerState.onMessage()` broadcasts via a Ktor WebSocket to every connected frontend client, which refetches the city list. Dashboard CRUD and Agent CRUD follow the full RabbitMQ → consumer → persistence → notification chain. Domain operations (bulk updates, undo, snapshots) execute directly in the application and currently bypass the WebSocket notification, leaving connected clients with stale data. See `docs/solutions/realtime-propagation.md` for a complete analysis of the propagation chain, identified gaps, and the design for structured change events.
+
 ### Production assets
 
 Build the frontend and copy its output into Ktor resources before creating the application artifact:

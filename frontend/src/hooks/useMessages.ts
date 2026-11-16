@@ -31,8 +31,23 @@ export function useMessages(onCityChanged?: () => void, enabled = true): { messa
       socket.onmessage = (event) => {
         try {
           const message = JSON.parse(event.data) as WsMessage
-          if (message.body.includes('city-changed')) onCityChanged?.()
-          else if (typeof message.body === 'string') setMessages((current) => [...current, message])
+          const body = typeof message.body === 'string' ? message.body : JSON.stringify(message.body)
+          try {
+            const parsed = JSON.parse(body)
+            // Structured event (has operation field or event === 'city-changed') → trigger city reload
+            if (parsed.operation || parsed.event === 'city-changed') {
+              onCityChanged?.()
+            } else {
+              setMessages((current) => [...current, message])
+            }
+          } catch {
+            // Plain string message → check for "city-changed"
+            if (body.includes('city-changed')) {
+              onCityChanged?.()
+            } else {
+              setMessages((current) => [...current, message])
+            }
+          }
         } catch {
           // Ignore malformed messages while keeping the connection alive.
         }

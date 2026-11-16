@@ -73,11 +73,26 @@ export function App() {
     }
   }, [])
 
-  const { messages, connected } = useMessages(loadCities, Boolean(auth.user) && !auth.loading)
-
+  // Stabilize the city-reload callback so the WebSocket connection doesn't unnecessarily
+  // recreate on every render (which would drop incoming messages). The ref ensures the
+  // latest `loadCities` is always called while keeping the reference stable for `useMessages`.
+  const cityReloadRef = useRef<() => void>(loadCities)
   useEffect(() => {
-    void loadCities()
+    cityReloadRef.current = loadCities
   }, [loadCities])
+
+  const handleCityChanged = useCallback(() => {
+    cityReloadRef.current()
+  }, [])
+
+  const { messages, connected } = useMessages(handleCityChanged, Boolean(auth.user) && !auth.loading)
+
+  // Reload cities whenever auth state changes (login, logout, session refresh)
+  useEffect(() => {
+    if (!auth.loading && auth.user) {
+      void loadCities()
+    }
+  }, [auth.loading, auth.user, loadCities])
 
   useEffect(() => {
     const controller = new AbortController()

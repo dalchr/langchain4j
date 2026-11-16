@@ -95,6 +95,24 @@ internal data class CityPopulationUpdate(
     }
 }
 
+@Serializable
+data class CityChangedEvent(
+    val event: String = "city-changed",
+    val operation: String,
+    val conversationId: String? = null,
+    val actorId: String? = null,
+    val affectedCount: Int = 0,
+    val changes: List<CityChangeDetail> = emptyList(),
+)
+
+@Serializable
+data class CityChangeDetail(
+    val id: Int,
+    val name: String,
+    val beforePopulation: Int,
+    val afterPopulation: Int,
+)
+
 internal class AgentConversationRegistry(
     private val maxMessages: Int = 20,
 ) {
@@ -341,6 +359,15 @@ internal class CityAgentTools(
             val changesText = result.changes.joinToString("\n") { c -> "  ${c.name}: ${c.beforePopulation} → ${c.afterPopulation}" }
             val msg = "Applied a delta of $delta to ${result.affectedCount} cities:\n$changesText"
             recordOperation(conversationId, "updateAllCities delta=$delta, affected=${result.affectedCount}", actor.id)
+            val eventChanges = result.changes.map { c -> CityChangeDetail(c.cityId, c.name, c.beforePopulation, c.afterPopulation) }
+            val event = CityChangedEvent(
+                operation = "update_all",
+                conversationId = conversationId,
+                actorId = actor.id,
+                affectedCount = result.affectedCount,
+                changes = eventChanges,
+            )
+            ConsumerState.onMessage(Json.encodeToString(event))
             msg
         }.getOrElse { "Failed to update all cities: ${it.message ?: "unknown error"}" }
     }
@@ -357,6 +384,15 @@ internal class CityAgentTools(
             val changesText = result.changes.joinToString("\n") { c -> "  ${c.name}: ${c.beforePopulation} → ${c.afterPopulation}" }
             val msg = "Undid the last operation. Applied inverse delta to ${result.affectedCount} cities:\n$changesText"
             recordOperation(conversationId, "undoLastOperation, affected=${result.affectedCount}", actor.id)
+            val eventChanges = result.changes.map { c -> CityChangeDetail(c.cityId, c.name, c.beforePopulation, c.afterPopulation) }
+            val event = CityChangedEvent(
+                operation = "undo",
+                conversationId = conversationId,
+                actorId = actor.id,
+                affectedCount = result.affectedCount,
+                changes = eventChanges,
+            )
+            ConsumerState.onMessage(Json.encodeToString(event))
             msg
         }.getOrElse { "Failed to undo last operation: no committed operation to undo" }
     }
@@ -374,8 +410,18 @@ internal class CityAgentTools(
             val snapshotId = cityService.createSnapshot(name)
             val actor = executionContexts.getValue(conversationId)
             val count = runCatching { listCities.invoke().size }.getOrElse { 0 }
+            val citiesList = runCatching { listCities.invoke() }.getOrElse { emptyList() }
             val msg = "Created snapshot '$name' (id=$snapshotId) with $count cities."
             recordOperation(conversationId, "createSnapshot name=$name, id=$snapshotId, cities=$count", actor.id)
+            val eventChanges = citiesList.map { c -> CityChangeDetail(c.id, c.name, c.population, c.population) }
+            val event = CityChangedEvent(
+                operation = "snapshot",
+                conversationId = conversationId,
+                actorId = actor.id,
+                affectedCount = count,
+                changes = eventChanges,
+            )
+            ConsumerState.onMessage(Json.encodeToString(event))
             msg
         }.getOrElse { "Failed to create snapshot: ${it.message ?: "unknown error"}" }
     }
